@@ -412,14 +412,20 @@ main.wide { max-width: none; padding-left: 16px; padding-right: 16px; }
 
 @media (max-width: 1280px) {
   .sheet-layout { grid-template-columns: 1fr; }
-  .metrics-wrap { position: static; order: -1; max-width: 520px; }
+  .metrics-wrap { position: static; max-width: 520px; }
 }
 @media (max-width: 640px) {
   main.wide { padding-left: 10px; padding-right: 10px; }
-  .link-form { flex-basis: 100%; flex-direction: column; }
-  .link-form button { width: 100%; }
+  .link-form { flex-basis: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+  .link-form input { grid-column: 1 / -1; }
+  .link-form button { width: 100%; padding: 0 8px; }
   .sheet-scroll { max-height: calc(100dvh - 250px); }
   .sheet { font-size: 14px; }
   .sheet tbody tr > :nth-child(2), .sheet thead tr > :nth-child(2) { max-width: 130px; width: 130px; min-width: 130px; }
   .metrics { font-size: 14px; }
 }
+
+/* Seasons: rounds of applications. Season 1 is the archive of the first round. */
+.season-tabs { margin: 0 0 12px; }
+.season-tabs button span { margin-left: 7px; font-weight: 500; font-size: 12.5px; }
+.archive-note { margin: 0; max-width: 560px; }

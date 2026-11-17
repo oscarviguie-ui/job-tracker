@@ -38,6 +38,7 @@ const S = {
   appsQuery: "",
   sort: { key: null, dir: 1 },   // null = the log's own order (oldest row first, like the Excel)
   groupCollapsed: localGet("groupCollapsed", "0") === "1",
+  season: null,                  // which round of applications the log shows; null = the current one
   zoom: localGet("zoom", innerWidth < 700 ? "0.85" : "0.9"),
   drawer: null,          // { type: 'app'|'company', id|null }
   detect: null,          // detection preview in Companies
@@ -263,7 +264,7 @@ async function trackPosting(id) {
   const p = S.inbox.find((x) => x.id === id);
   if (!p) return;
   const { data, error } = await sb.from("applications").insert({
-    company: p.companies?.name ?? "", company_id: p.company_id, posting_id: p.id, role: p.title,
+    season: currentSeason(), company: p.companies?.name ?? "", company_id: p.company_id, posting_id: p.id, role: p.title,
     location: p.location, url: p.url, date_posted: p.posted_at, contract: guessContract(p.title),
   }).select().single();
   if (error) return fail(error, "Couldn't track it");
@@ -341,9 +342,13 @@ function fmtSheetDate(d) {
   const [y, m, day] = d.slice(0, 10).split("-");
   return `${day}/${m}/${y.slice(2)}`;
 }
+// Seasons are rounds of applications. Season 1 is the first round (the Excel); new rows go to the latest one.
+const currentSeason = () => Math.max(2, ...S.apps.map((a) => a.season ?? 2));
+const shownSeason = () => S.season ?? currentSeason();
+const seasonRows = (n = shownSeason()) => S.apps.filter((a) => (a.season ?? 2) === n);
 function sheetRows() {
   const q = S.appsQuery.trim().toLowerCase();
-  let list = S.apps.filter((a) => !q || [a.company, a.role, a.location, a.description, a.contract, a.notes]
+  let list = seasonRows().filter((a) => !q || [a.company, a.role, a.location, a.description, a.contract, a.notes]
     .some((v) => (v ?? "").toLowerCase().includes(q)));
   const { key, dir } = S.sort;
   if (key) {
@@ -382,8 +387,9 @@ function rowHtml(a, n) {
     ${COLS.map((c) => cellHtml(a, c)).join("")}
   </tr>`;
 }
+const rowNumber = (a) => seasonRows(a.season ?? 2).indexOf(a) + 1;
 function metricsPanel() {
-  const A = S.apps;
+  const A = seasonRows();
   const filled = A.filter((a) => a.applied).length;
   const responses = A.filter((a) => a.responded).length;
   const positive = A.filter((a) => a.positive).length;
@@ -405,29 +411,36 @@ function appsView() {
     return `<th class="${c.group ? "g" : ""}" style="width:${c.w}px;min-width:${c.w}px" data-sort="${c.key}" aria-sort="${on ? (S.sort.dir > 0 ? "ascending" : "descending") : "none"}">
       <span>${c.label}</span>${on ? `<i class="arrow">${S.sort.dir > 0 ? "▲" : "▼"}</i>` : ""}</th>`;
   }).join("");
+  const cur = currentSeason(), shown = shownSeason();
+  const seasons = [...new Set([cur, ...S.apps.map((a) => a.season ?? 2)])].sort((a, b) => b - a);
+  const archive = shown !== cur;
   return `
     <div class="page-head sheet-head">
       <div class="grow"><h1>Applications Log</h1></div>
+      ${archive ? `<p class="sub archive-note">Season ${shown} is kept as a record. New rows go to Season ${cur}, and links you add are checked against every season.</p>` : `
       <form id="link-form" class="link-form" autocomplete="off">
-        <input type="url" id="link-input" name="url" placeholder="Paste a job link to fill a new row" aria-label="Job posting link" required>
-        <button class="btn primary" type="submit">Add from link</button>
-      </form>
+        <input type="url" id="link-input" name="url" placeholder="Paste a job link" aria-label="Job posting link" required>
+        <button class="btn" type="submit" name="mode" value="later" title="Adds the row unticked, to apply when you have time">Save for later</button>
+        <button class="btn primary" type="submit" name="mode" value="applied" title="Adds the row with Applied ticked and today's date">Already applied</button>
+      </form>`}
     </div>
+    <div class="season-tabs seg" role="group" aria-label="Season">${seasons.map((n) =>
+      `<button data-season="${n}" aria-pressed="${n === shown}">Season ${n}<span class="faint">${seasonRows(n).length}</span></button>`).join("")}</div>
     <div class="sheet-tools">
       <input class="search" type="search" id="apps-q" placeholder="Search the log" value="${esc(S.appsQuery)}">
       <button class="btn sm" data-act="toggle-group" aria-pressed="${S.groupCollapsed}">${S.groupCollapsed ? "Show" : "Hide"} response columns</button>
       ${S.sort.key ? `<button class="btn sm ghost" data-act="clear-sort">Back to log order</button>` : ""}
       <div class="spacer"></div>
       <label class="zoom">Zoom <select id="zoom">${["0.6", "0.75", "0.85", "0.9", "1"].map((z) => `<option value="${z}" ${S.zoom === z ? "selected" : ""}>${Math.round(z * 100)}%</option>`).join("")}</select></label>
-      <button class="btn sm" data-act="add-row">Add empty row</button>
+      ${archive ? "" : `<button class="btn sm" data-act="add-row">Add empty row</button>`}
     </div>
     <div class="sheet-layout">
       <div class="sheet-scroll" id="sheet-scroll">
         <table class="sheet ${S.groupCollapsed ? "collapsed" : ""}" id="sheet" style="--zoom:${Number(S.zoom) || 1}">
           <thead><tr><th class="gutter corner" aria-label="Row"></th>${head}</tr></thead>
-          <tbody id="sheet-body">${list.map((a) => rowHtml(a, S.apps.indexOf(a) + 1)).join("")}</tbody>
+          <tbody id="sheet-body">${list.map((a) => rowHtml(a, rowNumber(a))).join("")}</tbody>
         </table>
-        ${list.length ? "" : `<div class="empty">${S.apps.length ? "No rows match the search." : "Paste a job link above to start the log."}</div>`}
+        ${list.length ? "" : `<div class="empty">${seasonRows().length ? "No rows match the search." : `Season ${shown} is empty. Paste a job link above: <b>Save for later</b> adds it to apply when you have time, <b>Already applied</b> logs one you've just sent.`}</div>`}
       </div>
       <aside class="metrics-wrap" id="metrics">${metricsPanel()}</aside>
     </div>
@@ -509,16 +522,57 @@ function editLink(td) {
   input.addEventListener("keydown", (e) => { if (e.key === "Escape") finish(false); if (e.key === "Enter") input.blur(); });
 }
 
+// ── Has this job been logged before, in any season? ──
+const fold = (t) => (t ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+function urlKey(u) {
+  try {
+    const x = new URL(u);
+    const li = x.hostname.endsWith("linkedin.com") && (x.pathname.match(/\/jobs\/view\/(?:[^/]*?-)?(\d{6,})/)?.[1] ?? x.searchParams.get("currentJobId"));
+    if (li) return `linkedin:${li}`;
+    return (x.hostname.replace(/^www\./, "") + x.pathname.replace(/\/(applications\/new|apply)\/?$/, "").replace(/\/+$/, "")).toLowerCase();
+  } catch { return null; }
+}
+const companyKey = (c) => fold(c).replace(/\b(sa|se|sas|ag|ltd|group|groupe|france)\b/g, "").replace(/[^a-z0-9]/g, "");
+const ROLE_NOISE = new Set(["stage", "stagiaire", "intern", "internship", "h", "f", "m", "x", "w", "d", "de", "du", "des", "la", "le", "les", "et", "en", "and", "the", "of", "for", "pour", "a", "au", "cdi", "cdd", "vie"]);
+const roleWords = (r) => new Set(fold(r).split(/[^a-z0-9]+/).filter((w) => w.length > 1 && !ROLE_NOISE.has(w)));
+function sameCompany(a, b) {
+  const x = companyKey(a), y = companyKey(b);
+  return !!x && !!y && (x === y || (Math.min(x.length, y.length) >= 3 && (x.startsWith(y) || y.startsWith(x))));
+}
+function similarRole(a, b) {
+  const x = roleWords(a), y = roleWords(b);
+  if (!x.size || !y.size) return false;
+  const shared = [...x].filter((w) => y.has(w)).length;
+  return shared / Math.min(x.size, y.size) >= 0.6;
+}
+function findRepeat(url, row) {
+  const key = urlKey(url);
+  const byUrl = key && S.apps.find((a) => a.url && urlKey(a.url) === key);
+  if (byUrl) return { a: byUrl, why: "the same link" };
+  if (row?.company && row?.role) {
+    const like = S.apps.find((a) => sameCompany(a.company, row.company) && similarRole(a.role, row.role));
+    if (like) return { a: like, why: "a very similar job" };
+  }
+  return null;
+}
+const describeRow = (a) => `${a.company}${a.role ? ` – ${a.role}` : ""} (Season ${a.season ?? 2}, row ${rowNumber(a)}, ${a.applied ? `applied${a.applied_on ? ` ${fmtSheetDate(a.applied_on)}` : ""}` : "not applied"})`;
+
 // Paste a link → read the posting → new row at the bottom, like typing in the next empty Excel row.
-async function addFromLink(raw) {
+//   mode "later":   saved to apply when there's time (Applied unticked)
+//   mode "applied": already sent, e.g. a LinkedIn Easy Apply (Applied ticked, dated today)
+async function addFromLink(raw, mode = "later") {
   let url;
   try { url = new URL(raw.trim()).toString(); } catch { return toast("That doesn't look like a link."); }
-  const dup = S.apps.find((a) => a.url && a.url.split("?")[0] === url.split("?")[0]);
-  if (dup) { focusRow(dup.id); return toast(`Already in the log: ${dup.company}${dup.role ? ` – ${dup.role}` : ""}`); }
+  const early = findRepeat(url);
+  if (early && !confirm(`You've logged this link before:\n\n${describeRow(early.a)}\n\nAdd it again?`)) {
+    S.season = early.a.season ?? 2;
+    render();
+    return focusRow(early.a.id);
+  }
   const input = $("#link-input");
-  const button = $("#link-form button");
+  const buttons = [...document.querySelectorAll("#link-form button")];
   if (input) { input.value = ""; input.disabled = true; }
-  if (button) { button.disabled = true; button.textContent = "Reading the posting…"; }
+  buttons.forEach((b) => { b.disabled = true; });
   const pending = document.createElement("tr");
   pending.className = "pending-row";
   pending.innerHTML = `<th class="gutter"></th><td colspan="${COLS.length}"><span class="spinner"></span>Reading ${esc(new URL(url).hostname)}…</td>`;
@@ -533,27 +587,42 @@ async function addFromLink(raw) {
   } catch (err) {
     note = `Couldn't read that page (${err.message ?? err}).`;
   }
+  const done = () => {
+    pending.remove();
+    if (input) input.disabled = false;
+    buttons.forEach((b) => { b.disabled = false; });
+  };
+  const late = !early && findRepeat(url, row);
+  if (late && !confirm(`This looks like ${late.why} you've logged before:\n\n${describeRow(late.a)}\n\nAdd it anyway?`)) {
+    done();
+    S.season = late.a.season ?? 2;
+    render();
+    return focusRow(late.a.id);
+  }
   const insert = {
+    season: currentSeason(), applied: mode === "applied",
     company: row.company || "", role: row.role ?? null, contract: row.contract ?? null, location: row.location ?? null,
     description: row.description ?? null, date_posted: row.date_posted ?? null, url,
-    company_id: S.companies.find((c) => c.name.toLowerCase() === (row.company ?? "").toLowerCase())?.id ?? null,
+    company_id: S.companies.find((c) => sameCompany(c.name, row.company))?.id ?? null,
   };
   const { data, error } = await sb.from("applications").insert(insert).select().single();
-  pending.remove();
-  if (input) input.disabled = false;
-  if (button) { button.disabled = false; button.textContent = "Add from link"; }
+  done();
   if (error) return fail(error, "Couldn't add the row");
   S.apps.push(data);
   S.sort = { key: null, dir: 1 };
+  S.season = null;
   render();
   focusRow(data.id, note ? "company" : null);
-  toast(note ? `${note} The link is saved; fill in the rest.` : `Added ${data.company}${data.role ? ` – ${data.role}` : ""}. Tick Applied once you've sent it.`);
+  const what = `${data.company}${data.role ? ` – ${data.role}` : ""}`;
+  toast(note ? `${note} The link is saved; fill in the rest.`
+    : mode === "applied" ? `Logged as applied today: ${what}` : `Saved for later: ${what}. Tick Applied once you've sent it.`);
 }
 async function addEmptyRow() {
-  const { data, error } = await sb.from("applications").insert({ company: "" }).select().single();
+  const { data, error } = await sb.from("applications").insert({ company: "", season: currentSeason() }).select().single();
   if (error) return fail(error, "Couldn't add a row");
   S.apps.push(data);
   S.sort = { key: null, dir: 1 };
+  S.season = null;
   render();
   focusRow(data.id, "company");
 }
@@ -724,7 +793,7 @@ async function saveSettings(form) {
   render();
 }
 function exportCsv() {
-  const cols = [["company", "Company"], ["role", "Position"], ["contract", "Position Length"], ["location", "Location"],
+  const cols = [["season", "Season"], ["company", "Company"], ["role", "Position"], ["contract", "Position Length"], ["location", "Location"],
     ["description", "Description"], ["date_posted", "Date Posted"], ["url", "Link"], ["applied", "Applied"],
     ["applied_on", "Application Date"], ["responded", "Response Received"], ["response_on", "Response Date"],
     ["wait", "Response Time (days)"], ["positive", "Positive Response"], ["contact", "Contacts"], ["next_step", "Next step"], ["notes", "Notes"]];
@@ -901,7 +970,7 @@ function bindView() {
   if (qApps) qApps.addEventListener("input", () => {
     S.appsQuery = qApps.value;
     const list = sheetRows();
-    $("#sheet-body").innerHTML = list.map((a) => rowHtml(a, S.apps.indexOf(a) + 1)).join("");
+    $("#sheet-body").innerHTML = list.map((a) => rowHtml(a, rowNumber(a))).join("");
   });
   $("#zoom")?.addEventListener("change", (e) => {
     S.zoom = e.target.value;
@@ -910,12 +979,8 @@ function bindView() {
   });
   const linkForm = $("#link-form");
   if (linkForm) {
-    linkForm.addEventListener("submit", (e) => { e.preventDefault(); addFromLink($("#link-input").value); });
-    // Pasting a link is enough: no need to press the button.
-    $("#link-input").addEventListener("paste", (e) => {
-      const text = (e.clipboardData?.getData("text") ?? "").trim();
-      if (/^https?:\/\/\S+$/i.test(text)) { e.preventDefault(); addFromLink(text); }
-    });
+    // Enter saves for later; the second button logs it as already applied.
+    linkForm.addEventListener("submit", (e) => { e.preventDefault(); addFromLink($("#link-input").value, e.submitter?.value === "applied" ? "applied" : "later"); });
   }
   $("#add-company")?.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -985,8 +1050,14 @@ document.addEventListener("click", async (e) => {
   if (dateCell && !e.target.closest("input")) return editDate(dateCell);
   const linkCell = e.target.closest("td.c-link");
   if (linkCell && !e.target.closest("a, input")) return editLink(linkCell);
-  const el = e.target.closest("[data-act], [data-inbox-tab], [data-open], [data-sort], [data-chip-remove], .post[data-i]");
+  const el = e.target.closest("[data-act], [data-inbox-tab], [data-open], [data-season], [data-sort], [data-chip-remove], .post[data-i]");
   if (!el) return;
+  if (el.dataset.season) {
+    const n = Number(el.dataset.season);
+    S.season = n === currentSeason() ? null : n;
+    S.appsQuery = "";
+    return render();
+  }
   if (el.dataset.chipRemove) {
     const k = el.dataset.chipRemove;
     S.settings[k] = S.settings[k].filter((_, i) => i !== Number(el.dataset.i));

@@ -3,7 +3,7 @@
 A personal job-search tracker that runs from anywhere:
 
 - **Inbox** — every morning a scraper reads the careers pages of the companies you follow and shows new postings that match your keywords and locations. Track one to turn it into an application, or dismiss it.
-- **Applications** — the Excel "Applications Log", kept as it was: the same 13 columns, the Applied / Response Received / Positive Response tick boxes (ticking stamps the date), the same row colours and the Performance Metrics block. Paste a job link and the row fills itself: company, position, contract type, location, a short description and date posted. The row number opens notes, contacts and history.
+- **Applications** — the Excel "Applications Log", kept as it was: the same 13 columns, the Applied / Response Received / Positive Response tick boxes (ticking stamps the date), the same row colours and the Performance Metrics block. Paste a job link and choose **Save for later** (row unticked, to apply when you have time) or **Already applied** (Applied ticked, dated today, e.g. a LinkedIn Easy Apply); the row fills itself: company, position, contract type, location, a short description and date posted. Rows are grouped into **seasons** (rounds of applications): Season 1 is the archive of the first round, new rows go to the latest season, and every new link is checked against all seasons so you don't apply to the same job twice. The row number opens notes, contacts and history.
 - **Companies** — add a company by pasting its careers-page URL; the app works out which system it runs on and previews what it finds. Pause, edit or run any company by hand.
 - **Settings** — keywords to include and exclude, locations, follow-up delay, CSV export.
 
