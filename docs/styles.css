@@ -114,7 +114,7 @@ h2 { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: -.01em; }
 .btn kbd { font: inherit; font-size: 11px; color: var(--faint); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
 .btn.primary kbd { color: inherit; border-color: color-mix(in oklab, var(--grid-ink) 40%, transparent); opacity: .8; }
 
-input[type=text], input[type=email], input[type=password], input[type=url], input[type=search], input[type=date], input[type=number], select, textarea {
+input[type=text], input[type=email], input[type=password], input[type=url], input[type=search], input[type=date], input[type=month], input[type=number], select, textarea {
   width: 100%; height: 36px; padding: 0 10px; border-radius: var(--radius-s); border: 1px solid var(--line);
   background: var(--surface); outline: none;
 }
@@ -377,7 +377,7 @@ main.wide { max-width: 1520px; }
   overflow: auto; max-height: calc(100dvh - 250px); min-height: 220px; background: var(--surface);
   border: 1px solid var(--line); border-radius: 12px;
 }
-.log { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: 100%; min-width: 1180px; font-size: 13.5px; }
+.log { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: 100%; min-width: 1280px; font-size: 13.5px; }
 .log th, .log td { padding: 7px 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
 .log thead th {
   position: sticky; top: 0; z-index: 3; background: color-mix(in oklab, var(--grid) 6%, var(--surface)); color: var(--muted);
@@ -408,6 +408,18 @@ main.wide { max-width: 1520px; }
 .ed.clamp { color: var(--muted); font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .ed.clamp:focus { display: block; -webkit-line-clamp: unset; color: var(--ink); white-space: pre-wrap; }
 .c-date { white-space: nowrap; }
+/* Start date: the one date that decides whether a role fits, so it reads in full ink, and turns red outside your window. */
+.c-start .ed { line-height: 1.3; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.c-start .ed:focus { font-weight: 400; }
+.c-start .ed:empty::before { content: "–"; color: var(--faint); font-weight: 400; }
+.c-start .ed:empty:hover::before { content: "add"; }
+.c-start .ed:empty:focus::before { content: "Feb 2027, ASAP…"; }
+.start-early .ed, .start-late .ed, .card-start.start-early, .card-start.start-late {
+  color: var(--t-negative); background: color-mix(in oklab, var(--t-negative) 11%, var(--surface));
+}
+.card-start { color: var(--ink); font-weight: 600; border-radius: 5px; }
+.card-start.start-early, .card-start.start-late { padding: 0 4px; }
+.window-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 420px; }
 .date-btn {
   all: unset; box-sizing: border-box; display: inline-block; white-space: nowrap; line-height: 1.4; padding: 2px 5px;
   border-radius: 5px; color: var(--muted); font-size: 12.5px; cursor: pointer; font-variant-numeric: tabular-nums; vertical-align: middle;

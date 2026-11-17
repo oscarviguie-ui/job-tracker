@@ -1,5 +1,6 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
+import { startFrom } from "./dates.js";
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -285,7 +286,7 @@ async function trackPosting(id) {
     const { data: x } = await sb.functions.invoke("extract", { body: { url: p.url } });
     if (x?.ok) {
       const patch = {};
-      for (const k of ["description", "contract", "location", "date_posted"]) if (!data[k] && x.row[k]) patch[k] = x.row[k];
+      for (const k of ["description", "contract", "location", "date_posted", "starts"]) if (!data[k] && x.row[k]) patch[k] = x.row[k];
       if (Object.keys(patch).length) await savePatch(data.id, patch, true);
     }
   } catch { /* the row is there either way */ }
@@ -387,6 +388,7 @@ const COLS = [
   { key: "company", label: "Company", kind: "text", w: 168 },
   { key: "role", label: "Position", kind: "text", w: 0 },        // 0 = shares the remaining width
   { key: "contract", label: "Type", kind: "text", w: 88, title: "Position Length" },
+  { key: "starts", label: "Starts", kind: "start", w: 118, title: "When the job starts, as the ad states it" },
   { key: "location", label: "Location", kind: "text", w: 104 },
   { key: "description", label: "Description", kind: "long", w: 0 },
   { key: "date_posted", label: "Posted", kind: "date", w: 76, title: "Date Posted" },
@@ -410,6 +412,28 @@ function shortDate(d) {
   return dt.toLocaleDateString("en-GB", { day: "numeric", month: "short", ...(sameYear ? {} : { year: "2-digit" }) });
 }
 const fmtSheetDate = shortDate;
+// How old an ad is: "today", "3 d ago" for the last month, then the date.
+function postedAgo(d) {
+  if (!d) return "";
+  const n = daysBetween(d);
+  return n <= 0 ? "today" : n <= 30 ? `${n} d ago` : shortDate(d);
+}
+
+// Start dates are kept as the ad (or you) wrote them, tidied: "Feb 2027", "Jan–Mar 2027", "ASAP".
+// The same reader as the link extractor turns them back into a day, for sorting and for your start window.
+const readStart = (text) => (text ? startFrom(null, `Start date: ${text}`, today()) : null);
+const tidyStart = (text) => readStart(text)?.text ?? text;
+const startDay = (a) => readStart(a.starts)?.from ?? null;
+// Flag rows you could still act on whose start falls outside the window set in Settings. A range or an either/or
+// ("Jan–Mar", "Dec or Feb") is only flagged when none of it fits.
+function startFlag(a) {
+  const s = S.settings ?? {}, st = readStart(a.starts);
+  if (!st || !["saved", "applied", "interview", "offer"].includes(a.status) || (a.season ?? 2) !== currentSeason()) return null;
+  if (s.available_from && st.to.slice(0, 7) < s.available_from.slice(0, 7)) return { kind: "early", why: `Starts before ${monthName(s.available_from)}, the earliest you can start` };
+  if (s.available_until && st.from.slice(0, 7) > s.available_until.slice(0, 7)) return { kind: "late", why: `Starts after ${monthName(s.available_until)}, the latest start that works for you` };
+  return null;
+}
+const monthName = (d) => new Date(d.slice(0, 10) + "T12:00:00").toLocaleDateString("en-GB", { month: "short", year: "numeric" });
 
 // Seasons are rounds of applications. The current one is a setting, so a new season can start empty.
 const currentSeason = () => S.settings?.current_season ?? 2;
@@ -422,7 +446,10 @@ function sheetRows() {
     && (!q || [a.company, a.role, a.location, a.description, a.contract, a.notes].some((v) => fold(v).includes(q))));
   const { key, dir } = S.sort;
   if (!key) return [...list].reverse(); // newest first: what you just added is at the top
-  const order = (a) => (key === "status" ? STATUSES.findIndex((x) => x.id === a.status) : a[key] ?? "");
+  // Empty dates sort last either way round.
+  const order = (a) => (key === "status" ? STATUSES.findIndex((x) => x.id === a.status)
+    : key === "starts" ? startDay(a) ?? (dir > 0 ? "9999" : "")
+    : key === "date_posted" ? a.date_posted ?? (dir > 0 ? "9999" : "") : a[key] ?? "");
   return [...list].sort((a, b) => {
     const va = order(a), vb = order(b);
     return dir * (typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "fr", { numeric: true, sensitivity: "base" }));
@@ -452,7 +479,12 @@ function cellHtml(a, c) {
       return `<td class="c-${c.key}"><div class="ed" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</div></td>`;
     case "long":
       return `<td class="c-desc"><div class="ed clamp" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</div></td>`;
+    case "start": {
+      const f = startFlag(a);
+      return `<td class="c-start${f ? ` start-${f.kind}` : ""}"${f ? ` title="${esc(f.why)}"` : ""}><div class="ed" data-field="starts" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</div></td>`;
+    }
     case "date":
+      if (c.key === "date_posted" && v) return `<td class="c-date" title="Posted ${esc(postedAgo(v))}">${dateBtn(a, c.key)}</td>`;
       return `<td class="c-date">${c.key === "applied_on" && !a.applied ? "" : dateBtn(a, c.key)}</td>`;
     case "link":
       return `<td class="c-link">${v ? `<a class="open-link" href="${safeUrl(v)}" target="_blank" rel="noopener" title="${esc(v)}" aria-label="Open the posting">${ICON_OPEN}</a>` : ""}<button type="button" class="link-edit" data-edit-link title="${v ? "Change the link" : "Add a link"}">${v ? "✎" : "+"}</button></td>`;
@@ -471,11 +503,13 @@ function rowHtml(a, n) {
 }
 // Phone: one card per row. Tap the text to edit everything; the status changes in place.
 function cardHtml(a, n) {
-  const meta = [a.contract, a.location].filter(Boolean).map(esc).join(" · ");
+  const f = startFlag(a);
+  const meta = [a.contract && esc(a.contract), a.starts && `<span class="card-start${f ? ` start-${f.kind}` : ""}"${f ? ` title="${esc(f.why)}"` : ""}>starts ${esc(a.starts)}</span>`,
+    a.location && esc(a.location)].filter(Boolean).join(" · ");
   const d = responseDays(a), w = waitingDays(a);
   const when = a.responded ? `${a.response_on ? `reply ${esc(shortDate(a.response_on))}` : "replied"}${d !== null ? ` · ${d} d` : ""}`
     : a.applied ? `applied ${a.applied_on ? esc(shortDate(a.applied_on)) : ""}${w !== null ? ` · ${w} d waiting` : ""}`
-    : a.date_posted ? `posted ${esc(shortDate(a.date_posted))}` : "";
+    : a.date_posted ? `posted ${esc(postedAgo(a.date_posted))}` : "";
   return `<article class="card tone-${rowTone(a)}" data-row="${a.id}">
     <button type="button" class="card-main" data-open="${a.id}">
       ${logoHtml(a.company, "lg")}
@@ -600,9 +634,16 @@ async function commitCell(ed) {
   const a = S.apps.find((x) => x.id === id);
   let value = ed.textContent.replace(/ /g, " ").trim();
   if (field !== "description") value = value.replace(/\s+/g, " ");
+  if (field === "starts" && value) { value = tidyStart(value); ed.textContent = value; }
   if ((a[field] ?? "") === value) return;
   if (field === "company" && !value) { ed.textContent = a.company; return toast("A row needs a company name."); }
-  await savePatch(id, { [field]: value || null }, true);
+  const saved = await savePatch(id, { [field]: value || null }, true);
+  if (saved && field === "starts") {
+    // Re-check the start window on the spot without redrawing the row (that would steal focus while tabbing).
+    const td = ed.closest("td"), f = startFlag(saved);
+    td.className = `c-start${f ? ` start-${f.kind}` : ""}`;
+    if (f) td.title = f.why; else td.removeAttribute("title");
+  }
 }
 function editDate(btn) {
   const id = Number(btn.closest("[data-row]").dataset.row);
@@ -763,7 +804,7 @@ async function addFromLink(raw, mode = "later") {
   const insert = {
     season: currentSeason(), status: mode === "applied" ? "applied" : "saved",
     company: row.company || "", role: row.role ?? null, contract: row.contract ?? null, location: row.location ?? null,
-    description: row.description ?? null, date_posted: row.date_posted ?? null, url,
+    description: row.description ?? null, date_posted: row.date_posted ?? null, starts: row.starts ?? null, url,
     company_id: S.companies.find((c) => sameCompany(c.name, row.company))?.id ?? null,
   };
   const { data, error } = await sb.from("applications").insert(insert).select().single();
@@ -777,8 +818,9 @@ async function addFromLink(raw, mode = "later") {
   render();
   focusRow(data.id, note && !mobileQuery.matches ? "company" : null);
   if (note && mobileQuery.matches) openApp(data.id);
+  const when = data.starts ? ` · starts ${data.starts}` : " · the ad gives no start date";
   toast(note ? `${note} The link is saved.`
-    : mode === "applied" ? `Logged as applied: ${data.company}` : `Saved for later: ${data.company}`);
+    : (mode === "applied" ? `Logged as applied: ${data.company}` : `Saved for later: ${data.company}`) + when);
 }
 // Typed a company name instead of a link: a row to fill by hand.
 async function addTypedRow(company, mode) {
@@ -941,6 +983,12 @@ function settingsView() {
       <section><h2>Hide titles containing</h2>${chipEditor("exclude_keywords", s.exclude_keywords, "Add a keyword and press Enter")}</section>
       <section><h2>Locations</h2>${chipEditor("locations", s.locations, "Add a city, region or country")}
         <p class="faint small" style="margin:0">Postings without a location are always kept.</p></section>
+      <section><h2>When you can start</h2>
+        <div class="window-fields">
+          <label class="field"><span>Earliest start</span><input type="month" name="available_from" value="${esc((s.available_from ?? "").slice(0, 7))}"></label>
+          <label class="field"><span>Latest start</span><input type="month" name="available_until" value="${esc((s.available_until ?? "").slice(0, 7))}"></label>
+        </div>
+        <p class="faint small" style="margin:0">Rows you're still working on whose start date falls outside these months are flagged in the log. Leave empty to flag nothing.</p></section>
       <section style="max-width:340px"><label class="field"><span>Flag applications with no reply after (days)</span>
         <input type="number" name="follow_up_days" min="1" max="120" value="${s.follow_up_days}"></label></section>
       <div class="toolbar"><button class="btn primary" type="submit">Save filters</button><span class="faint small">Saving re-checks every stored posting against the new filters.</span></div>
@@ -956,9 +1004,12 @@ async function saveSettings(form) {
     include_keywords: S.settings.include_keywords, role_keywords: S.settings.role_keywords ?? [],
     exclude_keywords: S.settings.exclude_keywords, locations: S.settings.locations,
     follow_up_days: Number(form.follow_up_days.value) || 14, updated_at: new Date().toISOString(),
+    available_from: form.available_from.value ? `${form.available_from.value}-01` : null,
+    available_until: form.available_until.value ? `${form.available_until.value}-01` : null,
   };
   const { error } = await sb.from("settings").update(patch).eq("id", 1);
   if (error) return fail(error, "Couldn't save");
+  Object.assign(S.settings, patch);
   const { data: n, error: e2 } = await sb.rpc("rematch_postings", { p_company_id: null });
   if (e2) return fail(e2, "Saved, but re-checking failed");
   await refreshCount();
@@ -966,7 +1017,7 @@ async function saveSettings(form) {
   render();
 }
 function exportCsv() {
-  const cols = [["season", "Season"], ["company", "Company"], ["role", "Position"], ["contract", "Position Length"], ["location", "Location"],
+  const cols = [["season", "Season"], ["company", "Company"], ["role", "Position"], ["contract", "Position Length"], ["starts", "Start Date"], ["location", "Location"],
     ["description", "Description"], ["date_posted", "Date Posted"], ["url", "Link"], ["status", "Status"], ["applied", "Applied"],
     ["applied_on", "Application Date"], ["responded", "Response Received"], ["response_on", "Response Date"],
     ["wait", "Response Time (days)"], ["positive", "Positive Response"], ["contact", "Contacts"], ["next_step", "Next step"], ["notes", "Notes"]];
@@ -997,12 +1048,13 @@ function drawerHtml() {
         ${f("company", "Company")}
         <label class="field"><span>Company website <span class="faint">(for the logo)</span></span><input type="text" name="brand_domain" placeholder="e.g. engie.com" value="${esc(brandFor(a.company)?.domain ?? "")}"></label>
         ${f("role", "Position", "text", "wide")}
+        <label class="field"><span>Start date</span><input type="text" name="starts" placeholder="e.g. Feb 2027, Jan–Mar 2027, ASAP" value="${esc(a.starts ?? "")}"></label>
+        ${f("date_posted", "Date Posted", "date")}
         <label class="field wide"><span>Status</span><select name="status">${STATUSES.filter((x) => !x.legacy || x.id === a.status).map((x) => `<option value="${x.id}" ${x.id === a.status ? "selected" : ""}>${x.label}</option>`).join("")}</select></label>
         ${f("applied_on", "Application Date", "date")}
         ${f("response_on", "Response Date", "date")}
         <label class="field"><span>Position Length</span><input type="text" name="contract" list="contracts" value="${esc(a.contract ?? "")}"></label>
         ${f("location", "Location")}
-        ${f("date_posted", "Date Posted", "date")}
         ${f("url", "Link", "url")}
         <label class="field wide"><span>Description</span><textarea name="description" rows="4">${esc(a.description ?? "")}</textarea></label>
         ${f("contact", "Contacts", "text", "wide")}
@@ -1046,11 +1098,12 @@ async function saveApp() {
   const form = $("#app-form");
   const fd = new FormData(form);
   const row = {};
-  for (const k of ["company", "role", "status", "contract", "location", "description", "url", "date_posted", "applied_on", "response_on", "next_step", "contact", "documents", "notes"]) {
+  for (const k of ["company", "role", "status", "contract", "starts", "location", "description", "url", "date_posted", "applied_on", "response_on", "next_step", "contact", "documents", "notes"]) {
     const v = (fd.get(k) ?? "").toString().trim();
     row[k] = v === "" ? null : v;
   }
   if (!row.company) return toast("Add the company name first.");
+  if (row.starts) row.starts = tidyStart(row.starts);
   const id = S.drawer.id;
   const site = (fd.get("brand_domain") ?? "").toString().trim().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "").toLowerCase();
   if (site && site !== (brandFor(row.company)?.domain ?? "")) {
