@@ -4,17 +4,20 @@ import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ───────────────────────────── vocabulary ─────────────────────────────
-// Statuses only describe a combination of the log's tick boxes; they label the history in the record panel.
+// One status per row. The Excel's three ticks are facts derived from it (the database keeps them in step):
+// Applied = anything past "To apply" except Skipped; Response = Rejected, Interview, Offer, Accepted;
+// Positive = Interview, Offer, Accepted. Dates stamp themselves when a row moves forward.
 const STATUSES = [
-  { id: "saved", label: "Not applied" },
-  { id: "applied", label: "Applied" },
-  { id: "interview", label: "Positive response" },
-  { id: "offer", label: "Offer" },
-  { id: "accepted", label: "Accepted" },
-  { id: "rejected", label: "Negative response" },
-  { id: "no_response", label: "Applied" },
-  { id: "withdrawn", label: "Withdrawn" },
-  { id: "skipped", label: "Not applied" },
+  { id: "saved", label: "To apply", tone: "pending" },
+  { id: "applied", label: "Applied", tone: "applied" },
+  { id: "interview", label: "Interview", tone: "positive" },
+  { id: "offer", label: "Offer", tone: "offer" },
+  { id: "accepted", label: "Accepted", tone: "offer" },
+  { id: "rejected", label: "Rejected", tone: "negative" },
+  { id: "skipped", label: "Skipped", tone: "skipped" },
+  // older values, shown if a row has them but not offered
+  { id: "no_response", label: "Applied", tone: "applied", legacy: true },
+  { id: "withdrawn", label: "Withdrawn", tone: "skipped", legacy: true },
 ];
 const STATUS = Object.fromEntries(STATUSES.map((s) => [s.id, s]));
 const ATS_LABEL = {
@@ -37,7 +40,7 @@ const S = {
   cursor: 0,
   appsQuery: "",
   sort: { key: null, dir: 1 },   // null = the log's own order (oldest row first, like the Excel)
-  tone: null,                    // filter: pending | applied | positive | negative
+  filter: null,                  // status shown in the log, null = all
   pendingLink: null,             // a link shared to the app, waiting for Save for later / Already applied
   season: null,                  // which round of applications the log shows; null = the current one
   drawer: null,          // { type: 'app'|'company', id|null }
@@ -265,7 +268,7 @@ async function trackPosting(id) {
   const p = S.inbox.find((x) => x.id === id);
   if (!p) return;
   const { data, error } = await sb.from("applications").insert({
-    season: currentSeason(), company: p.companies?.name ?? "", company_id: p.company_id, posting_id: p.id, role: p.title,
+    season: currentSeason(), status: "saved", company: p.companies?.name ?? "", company_id: p.company_id, posting_id: p.id, role: p.title,
     location: p.location, url: p.url, date_posted: p.posted_at, contract: guessContract(p.title),
   }).select().single();
   if (error) return fail(error, "Couldn't track it");
@@ -311,41 +314,28 @@ async function removeFromInbox(id, state) {
 }
 
 // ───────────────────────────── applications log ─────────────────────────────
-// The Excel log's model, kept whole: Company, Position, Position Length, Location, Description, Date Posted,
-// Link, and the three tick boxes (Applied, Response Received, Positive Response) with their dates and the
-// response time. Layout: a full-width table on a computer, a card per row on a phone.
-// Tick + date pairs share a column so every column fits on a laptop screen without sideways scrolling.
+// The Excel's columns, with one Status per row in place of the three tick boxes.
+// Computer: a full-width table. Phone: a card per row.
 const COLS = [
   { key: "company", label: "Company", kind: "text", w: 140 },
   { key: "role", label: "Position", kind: "text", w: 0 },        // 0 = shares the remaining width
-  { key: "contract", label: "Type", kind: "text", w: 92, list: "contracts", title: "Position Length" },
+  { key: "contract", label: "Type", kind: "text", w: 88, title: "Position Length" },
   { key: "location", label: "Location", kind: "text", w: 104 },
   { key: "description", label: "Description", kind: "long", w: 0 },
-  { key: "date_posted", label: "Posted", kind: "date", w: 82, title: "Date Posted" },
-  { key: "url", label: "Link", kind: "link", w: 52 },
-  { key: "applied", label: "Applied", kind: "applied", w: 100, title: "Applied · Application Date" },
-  { key: "responded", label: "Response", kind: "response", w: 132, title: "Response Received · Response Date · Response Time" },
-  { key: "positive", label: "Positive", kind: "check", w: 74, title: "Positive Response" },
+  { key: "date_posted", label: "Posted", kind: "date", w: 76, title: "Date Posted" },
+  { key: "url", label: "Link", kind: "link", w: 50 },
+  { key: "status", label: "Status", kind: "status", w: 128 },
+  { key: "applied_on", label: "Applied", kind: "date", w: 76, title: "Application Date" },
+  { key: "response_on", label: "Reply", kind: "reply", w: 104, title: "Response Date · Response Time (days)" },
 ];
 const CONTRACT_SUGGESTIONS = ["Stage", "CDI", "CDD", "VIE", "Alternance", "Graduate Program"];
-const TONES = [
-  { id: "pending", label: "To apply" },
-  { id: "applied", label: "Waiting" },
-  { id: "positive", label: "Positive" },
-  { id: "negative", label: "Negative" },
-];
 const mobileQuery = matchMedia("(max-width: 760px)");
 
+const statusOf = (a) => STATUS[a.status] ?? STATUS.saved;
+const rowTone = (a) => statusOf(a).tone;
 const responseDays = (a) => (a.applied_on && a.response_on ? daysBetween(a.applied_on, a.response_on) : null);
-// Row colour follows the Excel's conditional formatting, in its rule order.
-function rowTone(a) {
-  if (!a.company && !a.role) return "blank";
-  if (a.responded && !a.positive) return "negative";
-  if (a.positive) return "positive";
-  if (a.applied) return "applied";
-  return "pending";
-}
-const toneLabel = (t) => TONES.find((x) => x.id === t)?.label ?? "";
+// Days since applying with no reply yet; only meaningful in the season you're working on.
+const waitingDays = (a) => (a.status === "applied" && a.applied_on && (a.season ?? 2) === currentSeason() ? daysBetween(a.applied_on) : null);
 function shortDate(d) {
   if (!d) return "";
   const dt = new Date(d.slice(0, 10) + "T12:00:00");
@@ -354,35 +344,38 @@ function shortDate(d) {
 }
 const fmtSheetDate = shortDate;
 
-// Seasons are rounds of applications. Season 1 is the first round (the Excel); new rows go to the latest one.
-const currentSeason = () => Math.max(2, ...S.apps.map((a) => a.season ?? 2));
+// Seasons are rounds of applications. The current one is a setting, so a new season can start empty.
+const currentSeason = () => S.settings?.current_season ?? 2;
 const shownSeason = () => S.season ?? currentSeason();
 const seasonRows = (n = shownSeason()) => S.apps.filter((a) => (a.season ?? 2) === n);
 const rowNumber = (a) => seasonRows(a.season ?? 2).indexOf(a) + 1;
 function sheetRows() {
   const q = fold(S.appsQuery.trim());
-  let list = seasonRows().filter((a) => (!S.tone || rowTone(a) === S.tone) && (!q || [a.company, a.role, a.location, a.description, a.contract, a.notes]
-    .some((v) => fold(v).includes(q))));
+  let list = seasonRows().filter((a) => (!S.filter || a.status === S.filter || (S.filter === "applied" && a.status === "no_response"))
+    && (!q || [a.company, a.role, a.location, a.description, a.contract, a.notes].some((v) => fold(v).includes(q))));
   const { key, dir } = S.sort;
   if (!key) return [...list].reverse(); // newest first: what you just added is at the top
-  const val = (a) => {
-    if (key === "applied") return a.applied ? a.applied_on ?? "0" : "";
-    if (key === "responded") return a.responded ? a.response_on ?? "0" : "";
-    if (key === "positive") return Number(a.positive);
-    return a[key] ?? "";
-  };
+  const order = (a) => (key === "status" ? STATUSES.findIndex((x) => x.id === a.status) : a[key] ?? "");
   return [...list].sort((a, b) => {
-    const va = val(a), vb = val(b);
+    const va = order(a), vb = order(b);
     return dir * (typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "fr", { numeric: true, sensitivity: "base" }));
   });
 }
 
 // ── pieces shared by the table and the cards ──
-const tick = (a, key, label) =>
-  `<label class="tick" title="${label}"><input type="checkbox" data-check="${key}" ${a[key] ? "checked" : ""} aria-label="${label}"><span aria-hidden="true"></span></label>`;
+const statusSelect = (a) => `<select class="status-pill tone-${rowTone(a)}" data-status-of="${a.id}" aria-label="Status">${
+  STATUSES.filter((x) => !x.legacy || x.id === a.status).map((x) => `<option value="${x.id}" ${x.id === a.status ? "selected" : ""}>${x.label}</option>`).join("")}</select>`;
 const dateBtn = (a, field, empty = "") =>
   `<button type="button" class="date-btn ${a[field] ? "" : "is-empty"}" data-date="${field}" title="Change the date">${a[field] ? esc(shortDate(a[field])) : empty}</button>`;
 const ICON_OPEN = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>`;
+function replyHtml(a) {
+  if (a.responded) {
+    const d = responseDays(a);
+    return `${dateBtn(a, "response_on")}${d !== null ? `<span class="days" title="Response time">${d} d</span>` : ""}`;
+  }
+  const w = waitingDays(a);
+  return w !== null ? `<span class="waiting" title="Days since you applied, no reply yet">${w} d waiting</span>` : "";
+}
 
 function cellHtml(a, c) {
   const v = a[c.key];
@@ -392,17 +385,13 @@ function cellHtml(a, c) {
     case "long":
       return `<td class="c-desc"><div class="ed clamp" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</div></td>`;
     case "date":
-      return `<td class="c-date">${dateBtn(a, c.key)}</td>`;
+      return `<td class="c-date">${c.key === "applied_on" && !a.applied ? "" : dateBtn(a, c.key)}</td>`;
     case "link":
       return `<td class="c-link">${v ? `<a class="open-link" href="${safeUrl(v)}" target="_blank" rel="noopener" title="${esc(v)}" aria-label="Open the posting">${ICON_OPEN}</a>` : ""}<button type="button" class="link-edit" data-edit-link title="${v ? "Change the link" : "Add a link"}">${v ? "✎" : "+"}</button></td>`;
-    case "applied":
-      return `<td class="c-tick">${tick(a, "applied", "Applied")}${a.applied ? dateBtn(a, "applied_on", "+ date") : ""}</td>`;
-    case "response": {
-      const d = responseDays(a);
-      return `<td class="c-tick">${tick(a, "responded", "Response Received")}${a.responded ? dateBtn(a, "response_on", "+ date") : ""}${d !== null ? `<span class="days" title="Response time">${d} d</span>` : ""}</td>`;
-    }
-    case "check":
-      return `<td class="c-tick">${tick(a, c.key, "Positive Response")}</td>`;
+    case "status":
+      return `<td class="c-status">${statusSelect(a)}</td>`;
+    case "reply":
+      return `<td class="c-reply">${replyHtml(a)}</td>`;
   }
   return "<td></td>";
 }
@@ -412,49 +401,54 @@ function rowHtml(a, n) {
     ${COLS.map((c) => cellHtml(a, c)).join("")}
   </tr>`;
 }
-// Phone: one card per row. Tap the text to edit everything; the three ticks work in place.
+// Phone: one card per row. Tap the text to edit everything; the status changes in place.
 function cardHtml(a, n) {
-  const d = responseDays(a);
   const meta = [a.contract, a.location].filter(Boolean).map(esc).join(" · ");
+  const d = responseDays(a), w = waitingDays(a);
+  const when = a.responded ? `${a.response_on ? `reply ${esc(shortDate(a.response_on))}` : "replied"}${d !== null ? ` · ${d} d` : ""}`
+    : a.applied ? `applied ${a.applied_on ? esc(shortDate(a.applied_on)) : ""}${w !== null ? ` · ${w} d waiting` : ""}`
+    : a.date_posted ? `posted ${esc(shortDate(a.date_posted))}` : "";
   return `<article class="card tone-${rowTone(a)}" data-row="${a.id}">
     <button type="button" class="card-main" data-open="${a.id}">
       <span class="card-top"><b class="co">${esc(a.company) || '<span class="faint">No company</span>'}</b><span class="n">#${n}</span></span>
       ${a.role ? `<span class="card-role">${esc(a.role)}</span>` : ""}
-      ${meta || a.date_posted ? `<span class="card-meta">${meta}${a.date_posted ? `${meta ? " · " : ""}posted ${esc(shortDate(a.date_posted))}` : ""}</span>` : ""}
+      ${meta ? `<span class="card-meta">${meta}</span>` : ""}
       ${a.description ? `<span class="card-desc">${esc(a.description)}</span>` : ""}
     </button>
     <div class="card-foot">
-      <label class="pill-tick"><input type="checkbox" data-check="applied" ${a.applied ? "checked" : ""}><span>Applied${a.applied_on ? ` <small>${esc(shortDate(a.applied_on))}</small>` : ""}</span></label>
-      <label class="pill-tick"><input type="checkbox" data-check="responded" ${a.responded ? "checked" : ""}><span>Response${a.response_on ? ` <small>${esc(shortDate(a.response_on))}${d !== null ? ` · ${d} d` : ""}</small>` : ""}</span></label>
-      <label class="pill-tick"><input type="checkbox" data-check="positive" ${a.positive ? "checked" : ""}><span>Positive</span></label>
+      ${statusSelect(a)}
+      <span class="card-when">${when}</span>
       ${a.url ? `<a class="card-link" href="${safeUrl(a.url)}" target="_blank" rel="noopener" aria-label="Open the posting">${ICON_OPEN}</a>` : ""}
     </div>
   </article>`;
 }
 const itemHtml = (a) => (mobileQuery.matches ? cardHtml(a, rowNumber(a)) : rowHtml(a, rowNumber(a)));
 
-// The Excel's Performance Metrics, as a strip of figures instead of a side panel.
-function kpis() {
+// The Excel's Performance Metrics, in one line.
+function ratios() {
   const A = seasonRows();
   const filled = A.filter((a) => a.applied).length;
   const responses = A.filter((a) => a.responded).length;
   const positive = A.filter((a) => a.positive).length;
-  const pct = (n, d, digits) => (d ? `${((100 * n) / d).toFixed(digits)}%` : "–");
-  const waits = A.map(responseDays).filter((d) => d !== null).sort((x, y) => x - y);
+  const pct = (n, digits) => (filled ? `${((100 * n) / filled).toFixed(digits)}%` : "–");
+  const waits = A.map(responseDays).filter((x) => x !== null).sort((x, y) => x - y);
   const median = waits.length ? waits[Math.floor(waits.length / 2)] : null;
-  return `<dl class="kpis">
-    <div><dt>Applications filled</dt><dd>${filled}</dd></div>
-    <div><dt>Responses</dt><dd>${responses}<small>${pct(responses, filled, 0)}</small></dd></div>
-    <div><dt>Positive responses</dt><dd>${positive}<small>${pct(positive, filled, 1)}</small></dd></div>
-    <div class="hide-xs"><dt>Typical reply time</dt><dd>${median === null ? "–" : `${median}<small>days</small>`}</dd></div>
+  return `<dl class="ratios">
+    <div><dt>applied</dt><dd>${filled}</dd></div>
+    <div title="${responses} responses"><dt>response rate</dt><dd>${pct(responses, 0)}</dd></div>
+    <div title="${positive} positive responses"><dt>positive</dt><dd>${pct(positive, 1)}</dd></div>
+    ${median === null ? "" : `<div class="hide-xs"><dt>typical reply</dt><dd>${median} d</dd></div>`}
   </dl>`;
 }
-function toneChips() {
+// Where the season stands: a bar of statuses that doubles as the filter.
+function statusBar() {
   const A = seasonRows();
-  const count = (t) => A.filter((a) => rowTone(a) === t).length;
-  return `<div class="tone-chips" role="group" aria-label="Show">
-    <button data-tone="" aria-pressed="${!S.tone}">All <span>${A.length}</span></button>
-    ${TONES.map((t) => `<button data-tone="${t.id}" class="t-${t.id}" aria-pressed="${S.tone === t.id}"><i></i>${t.label} <span>${count(t.id)}</span></button>`).join("")}
+  if (!A.length) return "";
+  const groups = STATUSES.filter((x) => !x.legacy).map((x) => ({ ...x, n: A.filter((a) => a.status === x.id || (x.id === "applied" && a.status === "no_response") || (x.id === "skipped" && a.status === "withdrawn")).length })).filter((g) => g.n);
+  return `<div class="mix" role="group" aria-label="Filter by status">
+    <div class="mix-bar">${groups.map((g) => `<span class="tone-${g.tone}" style="flex:${g.n}"></span>`).join("")}</div>
+    <div class="mix-legend">${groups.map((g) => `<button data-filter="${g.id}" class="tone-${g.tone}" aria-pressed="${S.filter === g.id}"><i></i>${g.label}<b>${g.n}</b></button>`).join("")}
+      ${S.filter ? `<button data-filter="" class="clear">Show all</button>` : ""}</div>
   </div>`;
 }
 function appsView() {
@@ -473,28 +467,27 @@ function appsView() {
   return `
     <div class="log-head">
       <h1>Applications</h1>
-      <div class="seg season-seg" role="group" aria-label="Season">${seasons.map((n) =>
-        `<button data-season="${n}" aria-pressed="${n === shown}">Season ${n}</button>`).join("")}</div>
-      ${kpis()}
+      <select id="season-select" class="season-select" aria-label="Season">
+        ${seasons.map((n) => `<option value="${n}" ${n === shown ? "selected" : ""}>Season ${n}${n === cur ? "" : " (record)"}</option>`).join("")}
+        <option value="new">Start Season ${cur + 1}…</option>
+      </select>
+      ${ratios()}
     </div>
     ${archive ? `<p class="archive-note">Season ${shown} is the record of that round. New links go to Season ${cur} and are checked against every season.</p>` : `
     <form id="link-form" class="add-bar" autocomplete="off">
       <div class="add-field">
-        <input type="url" id="link-input" name="url" inputmode="url" placeholder="Paste a job link" aria-label="Job posting link" required value="${esc(S.pendingLink ?? "")}">
-        ${navigator.clipboard?.readText ? `<button type="button" class="paste-btn" data-act="paste">Paste</button>` : ""}
+        <input type="text" id="link-input" name="url" inputmode="url" placeholder="Paste a job link, or type a company" aria-label="Job link or company name" required value="${esc(S.pendingLink ?? "")}">
+        ${mobile && navigator.clipboard?.readText ? `<button type="button" class="paste-btn" data-act="paste">Paste</button>` : ""}
       </div>
-      <button class="btn" type="submit" name="mode" value="later" title="Adds the row unticked, to apply when you have time">Save for later</button>
-      <button class="btn primary" type="submit" name="mode" value="applied" title="Adds the row with Applied ticked and today's date">Already applied</button>
+      <button class="btn" type="submit" name="mode" value="later" title="Adds the row as To apply">Save for later</button>
+      <button class="btn primary" type="submit" name="mode" value="applied" title="Adds the row as Applied, dated today">Already applied</button>
     </form>`}
     <div class="log-tools">
-      ${toneChips()}
+      ${statusBar()}
       <input class="search" type="search" id="apps-q" placeholder="Search" value="${esc(S.appsQuery)}" aria-label="Search the log">
-      ${S.sort.key && !mobile ? `<button class="btn sm ghost" data-act="clear-sort">Newest first</button>` : ""}
-      ${archive || mobile ? "" : `<button class="btn sm ghost" data-act="add-row" title="Add a row to fill by hand">+ Empty row</button>`}
     </div>
     ${mobile
-      ? `<div class="cards" id="rows">${list.map(itemHtml).join("")}</div>${list.length ? "" : empty}
-         ${archive ? "" : `<button class="btn ghost add-empty-m" data-act="add-row">+ Add a row by hand</button>`}`
+      ? `<div class="cards" id="rows">${list.map(itemHtml).join("")}</div>${list.length ? "" : empty}`
       : `<div class="log-scroll" id="log-scroll">
           <table class="log" id="log">
             <thead><tr><th class="gutter" aria-label="Row"></th>${head}</tr></thead>
@@ -502,7 +495,7 @@ function appsView() {
           </table>
           ${list.length ? "" : empty}
         </div>
-        <p class="faint small log-foot">Click a cell to edit it. Ticking Applied or Response stamps today's date (click the date to change it). The row number opens notes, contacts and history.</p>`}
+        <p class="faint small log-foot">Click a cell to edit it. Dates fill themselves when the status moves on; click one to change it. The row number opens notes, contacts and history.${S.sort.key ? ` <button class="linklike" data-act="clear-sort">Back to newest first</button>` : ""}</p>`}
     <datalist id="contracts">${CONTRACT_SUGGESTIONS.map((c) => `<option value="${c}">`).join("")}</datalist>`;
 }
 
@@ -515,10 +508,13 @@ function refreshRow(id) {
     el.outerHTML = itemHtml(a);
     if (focusedField) document.querySelector(`[data-row="${id}"] [data-field="${focusedField}"]`)?.focus();
   }
-  const k = $(".kpis");
-  if (k) k.outerHTML = kpis();
-  const t = $(".tone-chips");
-  if (t) t.outerHTML = toneChips();
+  refreshSummary();
+}
+function refreshSummary() {
+  const r = $(".ratios");
+  if (r) r.outerHTML = ratios();
+  const m = $(".mix");
+  if (m) m.outerHTML = statusBar();
 }
 async function savePatch(id, patch, quiet = false) {
   const { data, error } = await sb.from("applications").update(patch).eq("id", id).select().single();
@@ -535,12 +531,7 @@ async function commitCell(ed) {
   if (field !== "description") value = value.replace(/\s+/g, " ");
   if ((a[field] ?? "") === value) return;
   if (field === "company" && !value) { ed.textContent = a.company; return toast("A row needs a company name."); }
-  const data = await savePatch(id, { [field]: value || null }, true);
-  if (data) {
-    ed.closest("tr").className = `tone-${rowTone(data)}`;
-    const k = $(".kpis");
-    if (k) k.outerHTML = kpis();
-  }
+  await savePatch(id, { [field]: value || null }, true);
 }
 function editDate(btn) {
   const id = Number(btn.closest("[data-row]").dataset.row);
@@ -598,6 +589,26 @@ async function pasteLink() {
     $("#link-input")?.focus();
   }
 }
+// A new round of applications. Rows still "To apply" come along; everything else stays as the record.
+async function startSeason() {
+  const cur = currentSeason(), next = cur + 1;
+  const carry = S.apps.filter((a) => (a.season ?? 2) === cur && a.status === "saved");
+  const msg = `Start Season ${next}?\n\nNew links will go to Season ${next}, and Season ${cur} stays as a record you can look back at.`
+    + (carry.length ? `\n\nYour ${carry.length} "To apply" ${carry.length === 1 ? "row moves" : "rows move"} to Season ${next}.` : "");
+  if (!confirm(msg)) return render();
+  const { error } = await sb.from("settings").update({ current_season: next }).eq("id", 1);
+  if (error) return fail(error, "Couldn't start the season");
+  if (carry.length) {
+    const { error: e2 } = await sb.from("applications").update({ season: next }).in("id", carry.map((a) => a.id));
+    if (e2) fail(e2, "Couldn't move the To apply rows");
+    else carry.forEach((a) => { a.season = next; });
+  }
+  S.settings.current_season = next;
+  S.season = null;
+  S.filter = null;
+  render();
+  toast(`Season ${next} started`);
+}
 
 // ── Has this job been logged before, in any season? ──
 function urlKey(u) {
@@ -631,14 +642,16 @@ function findRepeat(url, row) {
   }
   return null;
 }
-const describeRow = (a) => `${a.company}${a.role ? ` – ${a.role}` : ""} (Season ${a.season ?? 2}, row ${rowNumber(a)}, ${a.applied ? `applied${a.applied_on ? ` ${fmtSheetDate(a.applied_on)}` : ""}` : "not applied"})`;
+const describeRow = (a) => `${a.company}${a.role ? ` – ${a.role}` : ""} (Season ${a.season ?? 2}, row ${rowNumber(a)}: ${statusOf(a).label}${a.applied_on ? `, applied ${shortDate(a.applied_on)}` : ""})`;
 
 // Paste a link → read the posting → new row at the bottom, like typing in the next empty Excel row.
 //   mode "later":   saved to apply when there's time (Applied unticked)
 //   mode "applied": already sent, e.g. a LinkedIn Easy Apply (Applied ticked, dated today)
 async function addFromLink(raw, mode = "later") {
   let url;
-  try { url = new URL(raw.trim()).toString(); } catch { return toast("That doesn't look like a link."); }
+  const text = raw.trim();
+  try { url = new URL(firstUrl(text) ?? text).toString(); } catch { url = null; }
+  if (!url) return addTypedRow(text, mode);
   const early = findRepeat(url);
   if (early && !confirm(`You've logged this link before:\n\n${describeRow(early.a)}\n\nAdd it again?`)) {
     S.season = early.a.season ?? 2;
@@ -677,7 +690,7 @@ async function addFromLink(raw, mode = "later") {
     return focusRow(late.a.id);
   }
   const insert = {
-    season: currentSeason(), applied: mode === "applied",
+    season: currentSeason(), status: mode === "applied" ? "applied" : "saved",
     company: row.company || "", role: row.role ?? null, contract: row.contract ?? null, location: row.location ?? null,
     description: row.description ?? null, date_posted: row.date_posted ?? null, url,
     company_id: S.companies.find((c) => sameCompany(c.name, row.company))?.id ?? null,
@@ -688,7 +701,7 @@ async function addFromLink(raw, mode = "later") {
   S.apps.push(data);
   S.sort = { key: null, dir: 1 };
   S.season = null;
-  S.tone = null;
+  S.filter = null;
   S.appsQuery = "";
   render();
   focusRow(data.id, note && !mobileQuery.matches ? "company" : null);
@@ -696,16 +709,24 @@ async function addFromLink(raw, mode = "later") {
   toast(note ? `${note} The link is saved.`
     : mode === "applied" ? `Logged as applied: ${data.company}` : `Saved for later: ${data.company}`);
 }
-async function addEmptyRow() {
-  const { data, error } = await sb.from("applications").insert({ company: "", season: currentSeason() }).select().single();
+// Typed a company name instead of a link: a row to fill by hand.
+async function addTypedRow(company, mode) {
+  if (!company) return;
+  const like = S.apps.find((a) => sameCompany(a.company, company));
+  if (like && !confirm(`You already have a row for ${like.company}:\n\n${describeRow(like)}\n\nAdd another?`)) return;
+  const { data, error } = await sb.from("applications").insert({
+    company, season: currentSeason(), status: mode === "applied" ? "applied" : "saved",
+    company_id: S.companies.find((c) => sameCompany(c.name, company))?.id ?? null,
+  }).select().single();
   if (error) return fail(error, "Couldn't add a row");
   S.apps.push(data);
   S.sort = { key: null, dir: 1 };
   S.season = null;
-  S.tone = null;
-  if (mobileQuery.matches) return openApp(data.id);
+  S.filter = null;
+  S.pendingLink = null;
+  if (mobileQuery.matches) { render(); return openApp(data.id); }
   render();
-  focusRow(data.id, "company");
+  focusRow(data.id, "role");
 }
 function focusRow(id, field) {
   const tr = document.querySelector(`[data-row="${id}"]`);
@@ -875,11 +896,11 @@ async function saveSettings(form) {
 }
 function exportCsv() {
   const cols = [["season", "Season"], ["company", "Company"], ["role", "Position"], ["contract", "Position Length"], ["location", "Location"],
-    ["description", "Description"], ["date_posted", "Date Posted"], ["url", "Link"], ["applied", "Applied"],
+    ["description", "Description"], ["date_posted", "Date Posted"], ["url", "Link"], ["status", "Status"], ["applied", "Applied"],
     ["applied_on", "Application Date"], ["responded", "Response Received"], ["response_on", "Response Date"],
     ["wait", "Response Time (days)"], ["positive", "Positive Response"], ["contact", "Contacts"], ["next_step", "Next step"], ["notes", "Notes"]];
   const cell = (v) => `"${String(typeof v === "boolean" ? (v ? "TRUE" : "FALSE") : v ?? "").replace(/"/g, '""')}"`;
-  const val = (a, k) => (k === "wait" ? responseDays(a) : a[k]);
+  const val = (a, k) => (k === "wait" ? responseDays(a) : k === "status" ? statusOf(a).label : a[k]);
   const csv = [cols.map(([, l]) => l).join(","), ...S.apps.map((a) => cols.map(([k]) => cell(val(a, k))).join(","))].join("\n");
   const url = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
   const link = Object.assign(document.createElement("a"), { href: url, download: `applications-${today()}.csv` });
@@ -895,7 +916,6 @@ function drawerHtml() {
   const a = S.apps.find((x) => x.id === d.id);
   const f = (name, label, type = "text", cls = "") =>
     `<label class="field ${cls}"><span>${label}</span><input type="${type}" name="${name}" value="${esc(a[name] ?? "")}"></label>`;
-  const chk = (name, label) => `<label class="check"><input type="checkbox" name="${name}" ${a[name] ? "checked" : ""}><span>${label}</span></label>`;
   return `<div class="scrim" data-act="close"></div>
   <aside class="drawer" role="dialog" aria-modal="true" aria-label="Application">
     <div class="drawer-head"><h2>${esc(a.company || "New row")}</h2>
@@ -905,7 +925,7 @@ function drawerHtml() {
       <div class="fields">
         ${f("company", "Company", "text", "wide")}
         ${f("role", "Position", "text", "wide")}
-        <div class="checks wide">${chk("applied", "Applied")}${chk("responded", "Response Received")}${chk("positive", "Positive Response")}</div>
+        <label class="field wide"><span>Status</span><select name="status">${STATUSES.filter((x) => !x.legacy || x.id === a.status).map((x) => `<option value="${x.id}" ${x.id === a.status ? "selected" : ""}>${x.label}</option>`).join("")}</select></label>
         ${f("applied_on", "Application Date", "date")}
         ${f("response_on", "Response Date", "date")}
         <label class="field"><span>Position Length</span><input type="text" name="contract" list="contracts" value="${esc(a.contract ?? "")}"></label>
@@ -954,11 +974,10 @@ async function saveApp() {
   const form = $("#app-form");
   const fd = new FormData(form);
   const row = {};
-  for (const k of ["company", "role", "contract", "location", "description", "url", "date_posted", "applied_on", "response_on", "next_step", "contact", "documents", "notes"]) {
+  for (const k of ["company", "role", "status", "contract", "location", "description", "url", "date_posted", "applied_on", "response_on", "next_step", "contact", "documents", "notes"]) {
     const v = (fd.get(k) ?? "").toString().trim();
     row[k] = v === "" ? null : v;
   }
-  for (const k of ["applied", "responded", "positive"]) row[k] = fd.get(k) === "on";
   if (!row.company) return toast("Add the company name first.");
   const id = S.drawer.id;
   const { data, error } = await sb.from("applications").update(row).eq("id", id).select().single();
@@ -1087,14 +1106,18 @@ function bindView() {
 }
 
 document.addEventListener("change", (e) => {
-  const box = e.target.closest("input[data-check]");
-  if (box) {
-    const id = Number(box.closest("[data-row]").dataset.row);
-    const patch = { [box.dataset.check]: box.checked };
-    // Same logic as the Excel: a positive response is a response; no response means it can't be positive.
-    if (box.dataset.check === "positive" && box.checked) patch.responded = true;
-    if (box.dataset.check === "responded" && !box.checked) patch.positive = false;
-    savePatch(id, patch);
+  const sel = e.target.closest("select[data-status-of]");
+  if (sel) {
+    sel.className = `status-pill tone-${STATUS[sel.value]?.tone}`;
+    savePatch(Number(sel.dataset.statusOf), { status: sel.value });
+  }
+  if (e.target.id === "season-select") {
+    if (e.target.value === "new") return startSeason();
+    const n = Number(e.target.value);
+    S.season = n === currentSeason() ? null : n;
+    S.appsQuery = "";
+    S.filter = null;
+    render();
   }
 });
 
@@ -1125,17 +1148,10 @@ document.addEventListener("click", async (e) => {
   const dateBtnEl = e.target.closest("button[data-date]");
   if (dateBtnEl) return editDate(dateBtnEl);
   if (e.target.closest("[data-edit-link]")) return editLink(e.target.closest("td"));
-  const el = e.target.closest("[data-act], [data-inbox-tab], [data-open], [data-season], [data-tone], [data-sort], [data-chip-remove], .post[data-i]");
+  const el = e.target.closest("[data-act], [data-inbox-tab], [data-open], [data-filter], [data-sort], [data-chip-remove], .post[data-i]");
   if (!el) return;
-  if (el.dataset.tone !== undefined) {
-    S.tone = el.dataset.tone && S.tone !== el.dataset.tone ? el.dataset.tone : null;
-    return render();
-  }
-  if (el.dataset.season) {
-    const n = Number(el.dataset.season);
-    S.season = n === currentSeason() ? null : n;
-    S.appsQuery = "";
-    S.tone = null;
+  if (el.dataset.filter !== undefined) {
+    S.filter = el.dataset.filter && S.filter !== el.dataset.filter ? el.dataset.filter : null;
     return render();
   }
   if (el.dataset.chipRemove) {
@@ -1185,9 +1201,8 @@ document.addEventListener("click", async (e) => {
     case "save-company": return saveCompany();
     case "delete-company": return deleteCompany();
     case "save-detected": return saveDetected();
-    case "add-row": return addEmptyRow();
     case "clear-sort": S.sort = { key: null, dir: 1 }; return render();
-    case "clear-filters": S.tone = null; S.appsQuery = ""; return render();
+    case "clear-filters": S.filter = null; S.appsQuery = ""; return render();
     case "paste": return pasteLink();
     case "save-app": return saveApp();
     case "delete-app": return deleteApp();
