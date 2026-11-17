@@ -25,6 +25,11 @@
   --s-skipped: #E3E6E8;
 
   --danger: #B9433A;
+  /* Row tones for the applications log, same rules as the Excel's conditional formatting */
+  --t-pending: #D9961A;   /* not applied yet */
+  --t-applied: #2F9C9E;   /* applied, waiting */
+  --t-positive: #2E9E5B;  /* positive response */
+  --t-negative: #D0564B;  /* response, not positive */
   --radius-s: 6px;
   --radius-m: 10px;
   --shadow: 0 1px 0 rgba(23, 33, 30, .04), 0 8px 24px -12px rgba(23, 33, 30, .18);
@@ -60,7 +65,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .boot { padding: 40px; color: var(--muted); }
 
 /* ── shell ── */
-.shell { min-height: 100dvh; display: grid; grid-template-rows: auto 1fr; }
+.shell { min-height: 100dvh; display: grid; grid-template-rows: auto 1fr; grid-template-columns: minmax(0, 1fr); }
 .topbar {
   position: sticky; top: 0; z-index: 20; background: color-mix(in oklab, var(--bg) 88%, transparent);
   backdrop-filter: blur(10px); border-bottom: 1px solid var(--line);
@@ -266,7 +271,8 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 
 #toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px); opacity: 0; pointer-events: none;
-  background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 999px; font-size: 14px; font-weight: 600;
+  background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 12px; font-size: 14px; font-weight: 600; line-height: 1.35;
+  width: max-content; text-align: center; box-shadow: var(--shadow);
   transition: opacity .2s, transform .2s; z-index: 100; max-width: calc(100vw - 32px);
 }
 #toast.show { opacity: 1; transform: translateX(-50%); }
@@ -274,6 +280,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 /* ── mobile ── */
 @media (max-width: 760px) {
   body { font-size: 15px; }
+  .topbar { backdrop-filter: none; background: var(--bg); } /* a backdrop filter would pin the fixed bottom nav inside the top bar */
   .topbar-inner { padding: 10px 16px; }
   .topbar .nav {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; background: var(--surface); border-top: 1px solid var(--line);
@@ -309,123 +316,189 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 
-/* ── Applications Log: the Excel sheet, kept as it was ──
-   Colours are the workbook's own: header in Office "Dark Blue 2, lighter 90%", rows tinted by the
-   same conditional-formatting rules (not applied → pink, applied → light green, positive → green,
-   negative → salmon). The sheet stays light in dark mode, like a page on a desk. */
-main.wide { max-width: none; padding-left: 16px; padding-right: 16px; }
-.sheet-head { align-items: center; flex-wrap: wrap; }
-.link-form { display: flex; gap: 8px; flex: 1 1 460px; max-width: 720px; }
-.link-form input { flex: 1; min-width: 0; height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--surface); }
-.link-form input:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
-.link-form button { height: 40px; white-space: nowrap; }
-.sheet-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
-.sheet-tools .search { width: 240px; max-width: 100%; }
-.sheet-tools .spacer { flex: 1; }
 
-.sheet-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
-.sheet { zoom: var(--zoom, 1); }
-.zoom { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
-.zoom select { height: 30px; padding: 0 6px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--surface); }
-.sheet-scroll {
-  --xl-ink: #000; --xl-grid: #000; --xl-head: #DCEAF7;
-  overflow: auto; max-height: calc(100dvh - 210px); background: #fff; color: var(--xl-ink);
-  border: 2px solid var(--xl-grid); border-radius: 2px; color-scheme: light;
-}
-.sheet {
-  border-collapse: separate; border-spacing: 0; table-layout: fixed; width: max-content;
-  font-family: "Aptos Narrow", "Archivo Narrow", "Arial Narrow", sans-serif; font-size: 14.5px; line-height: 1.25;
-}
-.sheet th, .sheet td {
-  border-right: 1px solid var(--xl-grid); border-bottom: 1px solid var(--xl-grid);
-  padding: 6px 8px; text-align: center; vertical-align: middle; background: inherit;
-}
-.sheet thead th {
-  position: sticky; top: 0; z-index: 3; background: var(--xl-head); color: #000; font-weight: 700; font-size: 15.5px;
-  border-bottom: 2px solid var(--xl-grid); cursor: pointer; user-select: none; height: 46px; white-space: normal;
-}
-.sheet thead th:hover { background: #C9DDF1; }
-.sheet thead th .arrow { font-style: normal; font-size: 10px; margin-left: 4px; vertical-align: 1px; color: #000; }
-.sheet .gutter {
-  position: sticky; left: 0; z-index: 2; width: 38px; min-width: 38px; padding: 0; background: #F3F3F3;
-  color: #555; font: 500 12px/1 var(--font); border-right: 2px solid var(--xl-grid);
-}
-.sheet thead .gutter { z-index: 4; cursor: default; background: #F3F3F3; }
-.sheet .gutter button {
-  all: unset; display: block; width: 100%; height: 100%; min-height: 32px; text-align: center; cursor: pointer;
-}
-.sheet .gutter button:hover, .sheet .gutter button:focus-visible { background: #E2E2E2; color: #000; }
-.sheet tbody tr > :nth-child(2) { position: sticky; left: 38px; z-index: 1; }
-.sheet thead tr > :nth-child(2) { position: sticky; left: 38px; z-index: 4; }
+/* ── Applications log ──
+   The Excel's model, laid out for reading: one full-width table on a computer, cards on a phone.
+   Row colour = the workbook's conditional formatting, shown as a tinted row with a coloured edge. */
+main.wide { max-width: 1520px; }
+.tone-pending { --tone: var(--t-pending); }
+.tone-applied { --tone: var(--t-applied); }
+.tone-positive { --tone: var(--t-positive); }
+.tone-negative { --tone: var(--t-negative); }
+.tone-blank { --tone: var(--line); }
 
-/* conditional formatting, in the workbook's rule order */
-.sheet tbody tr { background: #fff; }
-.sheet tr.tone-pending { background: #FFE5E5; color: #660033; }
-.sheet tr.tone-applied { background: #D9F2D0; color: #275417; }
-.sheet tr.tone-positive { background: #8ED973; color: #000; }
-.sheet tr.tone-negative { background: #FF7C80; color: #000; }
-.sheet tbody tr > td:first-of-type { background: inherit; }
-.sheet tbody tr.flash > td { animation: flash 1.6s ease-out; }
-@keyframes flash { 0%, 30% { box-shadow: inset 0 0 0 999px rgba(79, 123, 232, .28); } 100% { box-shadow: inset 0 0 0 999px transparent; } }
+.log-head { display: flex; align-items: center; gap: 14px 18px; flex-wrap: wrap; margin-bottom: 14px; }
+.log-head h1 { font-size: 26px; }
+.season-seg button { height: 30px; }
+.kpis { display: flex; gap: 6px; margin: 0 0 0 auto; }
+.kpis > div { padding: 6px 14px; border-left: 1px solid var(--line); }
+.kpis > div:first-child { border-left: 0; }
+.kpis dt { font-size: 12px; color: var(--muted); font-weight: 550; white-space: nowrap; }
+.kpis dd { margin: 1px 0 0; font-size: 21px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.kpis dd small { font-size: 12.5px; font-weight: 600; color: var(--muted); margin-left: 6px; letter-spacing: 0; }
+.archive-note { margin: 0 0 12px; padding: 10px 14px; border-radius: var(--radius-m); background: var(--sunk); color: var(--muted); font-size: 14px; }
 
-.sheet td[contenteditable] { cursor: text; outline: none; overflow-wrap: anywhere; }
-.sheet td[contenteditable]:focus { box-shadow: inset 0 0 0 2px #217346; background: #fff; color: #000; }
-.sheet td.c-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sheet td.c-text:focus { white-space: normal; overflow: visible; }
-.sheet td.c-long { white-space: pre-wrap; text-align: center; }
-.sheet td.c-date, .sheet td.c-link { cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.sheet td.c-date:focus-visible, .sheet td.c-link:focus-visible { box-shadow: inset 0 0 0 2px #217346; outline: none; }
-.sheet td.c-link { overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
-.sheet td.c-link a { color: #467886; text-decoration: underline; }
-.sheet td input[type="date"], .sheet td input[type="url"] {
-  width: 100%; min-width: 0; border: 0; padding: 2px; background: #fff; color: #000; font: inherit; text-align: center; outline: 2px solid #217346;
+.add-bar {
+  display: flex; gap: 8px; padding: 8px; margin-bottom: 14px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
 }
-.sheet td input[type="url"] { min-width: 260px; text-align: left; position: relative; z-index: 2; }
-.sheet td.c-calc { font-variant-numeric: tabular-nums; }
-.sheet td.c-check input {
-  appearance: none; -webkit-appearance: none; width: 17px; height: 17px; margin: 0; vertical-align: middle; cursor: pointer;
-  border: 1.5px solid currentColor; border-radius: 3px; background: #fff; display: inline-grid; place-content: center;
+.add-field { position: relative; flex: 1; min-width: 0; }
+.add-field input { height: 42px; padding-right: 74px; font-size: 15px; border-color: transparent; background: var(--bg); }
+.add-field input:focus { background: var(--surface); }
+.paste-btn {
+  position: absolute; right: 6px; top: 6px; height: 30px; padding: 0 11px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--surface); font-weight: 650; font-size: 13px; color: var(--ink); cursor: pointer;
 }
-.sheet td.c-check input::after { content: ""; width: 9px; height: 5px; border: solid #fff; border-width: 0 0 2px 2px; transform: rotate(-45deg) translate(1px, -1px); opacity: 0; }
-.sheet td.c-check input:checked { background: #217346; border-color: #217346; }
-.sheet td.c-check input:checked::after { opacity: 1; }
-.sheet td.c-check input:focus-visible { outline: 2px solid #217346; outline-offset: 2px; }
-.sheet.collapsed .g { display: none; }
-.sheet .pending-row td { text-align: left; color: #444; background: #fff; font-family: var(--font); }
-.spinner { display: inline-block; width: 12px; height: 12px; margin-right: 8px; vertical-align: -1px; border: 2px solid #c8c8c8; border-top-color: #217346; border-radius: 50%; animation: spin .8s linear infinite; }
+.add-bar > .btn { height: 42px; padding: 0 16px; }
+
+.log-tools { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.log-tools .search { width: 230px; height: 32px; margin-left: auto; }
+.tone-chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.tone-chips::-webkit-scrollbar { display: none; }
+.tone-chips button {
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px; border-radius: 999px; flex: none;
+  border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-weight: 600; font-size: 13px; cursor: pointer;
+}
+.tone-chips button span { color: var(--faint); font-weight: 600; font-variant-numeric: tabular-nums; }
+.tone-chips i { width: 8px; height: 8px; border-radius: 50%; background: var(--tone); }
+.tone-chips .t-pending { --tone: var(--t-pending); }
+.tone-chips .t-applied { --tone: var(--t-applied); }
+.tone-chips .t-positive { --tone: var(--t-positive); }
+.tone-chips .t-negative { --tone: var(--t-negative); }
+.tone-chips button[aria-pressed="true"] { color: var(--ink); border-color: var(--ink); background: color-mix(in oklab, var(--tone, var(--ink)) 10%, var(--surface)); }
+
+/* table */
+.log-scroll {
+  overflow: auto; max-height: calc(100dvh - 250px); min-height: 220px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 12px;
+}
+.log { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: 100%; min-width: 1180px; font-size: 13.5px; }
+.log th, .log td { padding: 7px 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+.log thead th {
+  position: sticky; top: 0; z-index: 3; background: color-mix(in oklab, var(--grid) 6%, var(--surface)); color: var(--muted);
+  font-size: 12.5px; font-weight: 650; height: 38px; cursor: pointer; white-space: nowrap; border-bottom-color: color-mix(in oklab, var(--grid) 22%, var(--line));
+}
+.log thead th:hover { color: var(--ink); }
+.log thead th .arrow { font-style: normal; margin-left: 4px; color: var(--ink); }
+.log thead th.h-applied, .log thead th.h-response, .log thead th.h-check, .log thead th.h-link { text-align: center; }
+.log .gutter { width: 40px; padding: 0; position: sticky; left: 0; z-index: 2; text-align: center; }
+.log thead .gutter { z-index: 4; cursor: default; }
+.log tbody td { background: color-mix(in oklab, var(--tone) 6%, var(--surface)); }
+.log tbody .gutter { background: color-mix(in oklab, var(--tone) 6%, var(--surface)); box-shadow: inset 3px 0 0 var(--tone); }
+.log tbody tr:hover td, .log tbody tr:hover .gutter { background: color-mix(in oklab, var(--tone) 12%, var(--surface)); }
+.log tbody tr > td:nth-child(2) { position: sticky; left: 40px; z-index: 1; }
+.log thead tr > th:nth-child(2) { position: sticky; left: 40px; z-index: 4; }
+.log .gutter button { all: unset; display: block; width: 100%; min-height: 36px; line-height: 36px; font-size: 11.5px; color: var(--faint); cursor: pointer; font-variant-numeric: tabular-nums; }
+.log .gutter button:hover, .log .gutter button:focus-visible { color: var(--ink); background: color-mix(in oklab, var(--tone) 18%, var(--surface)); }
+.log tr.flash td, .log tr.flash .gutter { animation: flash 1.6s ease-out; }
+@keyframes flash { 0%, 35% { background: color-mix(in oklab, var(--focus) 22%, var(--surface)); } }
+
+.ed { outline: none; border-radius: 5px; padding: 3px 5px; margin: -3px -5px; min-height: 1.45em; cursor: text; overflow-wrap: anywhere; }
+.ed:hover { box-shadow: inset 0 0 0 1px var(--line); }
+.ed:focus { background: var(--surface); box-shadow: 0 0 0 2px var(--focus); position: relative; z-index: 2; }
+.c-company .ed { font-weight: 700; }
+.c-company .ed, .c-role .ed, .c-contract .ed, .c-location .ed { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-company .ed:focus, .c-role .ed:focus, .c-contract .ed:focus, .c-location .ed:focus { white-space: normal; overflow: visible; }
+.c-contract .ed, .c-location .ed { color: var(--muted); }
+.ed.clamp { color: var(--muted); font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ed.clamp:focus { display: block; -webkit-line-clamp: unset; color: var(--ink); white-space: pre-wrap; }
+.c-tick { text-align: center; white-space: nowrap; }
+.c-date { white-space: nowrap; }
+.date-btn {
+  all: unset; box-sizing: border-box; display: inline-block; white-space: nowrap; line-height: 1.4; padding: 2px 5px;
+  border-radius: 5px; color: var(--muted); font-size: 12.5px; cursor: pointer; font-variant-numeric: tabular-nums; vertical-align: middle;
+}
+.date-btn:hover, .date-btn:focus-visible { background: var(--sunk); color: var(--ink); }
+.date-btn.is-empty { color: var(--faint); }
+.c-tick .date-btn.is-empty { opacity: 0; }
+.log tr:hover .c-tick .date-btn.is-empty, .c-tick .date-btn.is-empty:focus-visible { opacity: 1; }
+.c-date .date-btn.is-empty::before { content: "–"; font-style: normal; }
+.c-date .date-btn.is-empty:hover::before { content: "add"; }
+.date-input { width: 132px; height: 28px; font-size: 13px; padding: 0 6px; }
+.days { display: inline-block; margin-left: 2px; padding: 0 6px; border-radius: 999px; background: color-mix(in oklab, var(--tone) 16%, var(--surface)); font-size: 11.5px; font-weight: 650; line-height: 18px; vertical-align: middle; font-variant-numeric: tabular-nums; }
+.tick { display: inline-grid; vertical-align: middle; margin-right: 3px; cursor: pointer; position: relative; }
+.tick input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.tick span { width: 19px; height: 19px; border-radius: 6px; border: 1.5px solid var(--faint); background: var(--surface); display: grid; place-content: center; transition: background .12s, border-color .12s; }
+.tick span::after { content: ""; width: 9px; height: 5px; border: solid var(--grid-ink); border-width: 0 0 2px 2px; transform: rotate(-45deg) translate(1px, -1px); opacity: 0; }
+.tick input:checked + span { background: var(--grid); border-color: var(--grid); }
+.tick input:checked + span::after { opacity: 1; }
+.tick input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 2px; }
+.c-link { text-align: center; white-space: nowrap; }
+.open-link { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--focus); vertical-align: middle; }
+.open-link:hover { background: color-mix(in oklab, var(--focus) 12%, var(--surface)); }
+.link-edit { all: unset; display: inline-block; line-height: 24px; width: 20px; height: 24px; text-align: center; color: var(--faint); cursor: pointer; border-radius: 5px; opacity: 0; vertical-align: middle; font-size: 13px; }
+.log tr:hover .link-edit, .link-edit:focus-visible { opacity: 1; }
+.link-edit:hover { color: var(--ink); background: var(--sunk); }
+.c-link:not(:has(a)) .link-edit { opacity: .7; }
+.link-input { position: relative; z-index: 3; width: 320px; height: 30px; }
+.log-scroll > .empty { padding: 36px 20px; text-align: center; color: var(--muted); }
+.log-scroll > .empty h2 { color: var(--ink); margin-bottom: 6px; }
+.log-foot { margin: 10px 2px 0; }
+.pending-row td, div.pending-row { color: var(--muted); font-size: 13.5px; }
+.pending-row td { padding: 12px 14px; }
+.spinner { display: inline-block; width: 12px; height: 12px; margin-right: 8px; vertical-align: -1px; border: 2px solid var(--line); border-top-color: var(--grid); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.sheet-scroll .empty { font-family: var(--font); color: #555; }
-
-/* Performance Metrics block, as in columns P:Q */
-.metrics-wrap { position: sticky; top: 72px; }
-.metrics {
-  width: 100%; border-collapse: collapse; background: #fff; color: #000; color-scheme: light;
-  font-family: "Aptos Narrow", "Archivo Narrow", "Arial Narrow", sans-serif; font-size: 15px; border: 2px solid #000;
-}
-.metrics th { background: #DCEAF7; color: #000; font-size: 16px; font-weight: 700; text-align: center; padding: 9px 8px; border-bottom: 2px solid #000; white-space: normal; }
-.metrics td { padding: 7px 10px; border-bottom: 1px solid #000; }
-.metrics td:first-child { border-right: 1px solid #000; }
-.metrics td:last-child { text-align: center; font-variant-numeric: tabular-nums; width: 90px; font-size: 16px; }
-.sheet-foot { margin: 10px 0 0; }
-
 .drawer .checks { display: flex; gap: 18px; flex-wrap: wrap; padding: 4px 0; }
 
-@media (max-width: 1280px) {
-  .sheet-layout { grid-template-columns: 1fr; }
-  .metrics-wrap { position: static; max-width: 520px; }
+/* phone: cards */
+.cards { display: grid; gap: 8px; }
+.card {
+  position: relative; border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  background: color-mix(in oklab, var(--tone) 5%, var(--surface)); box-shadow: inset 4px 0 0 var(--tone);
 }
-@media (max-width: 640px) {
-  main.wide { padding-left: 10px; padding-right: 10px; }
-  .link-form { flex-basis: 100%; display: grid; grid-template-columns: 1fr 1fr; }
-  .link-form input { grid-column: 1 / -1; }
-  .link-form button { width: 100%; padding: 0 8px; }
-  .sheet-scroll { max-height: calc(100dvh - 250px); }
-  .sheet { font-size: 14px; }
-  .sheet tbody tr > :nth-child(2), .sheet thead tr > :nth-child(2) { max-width: 130px; width: 130px; min-width: 130px; }
-  .metrics { font-size: 14px; }
+.card.flash { animation: flash-card 1.6s ease-out; }
+@keyframes flash-card { 0%, 35% { background: color-mix(in oklab, var(--focus) 18%, var(--surface)); } }
+.card-main { all: unset; box-sizing: border-box; display: grid; gap: 1px; width: 100%; padding: 9px 12px 6px 15px; cursor: pointer; }
+.card-main:focus-visible { box-shadow: inset 0 0 0 2px var(--focus); }
+.card-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.card-top .co { font-size: 14.5px; font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-top .n { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; flex: none; }
+.card-role { font-size: 13.5px; font-weight: 550; line-height: 1.3; }
+.card-meta { font-size: 12px; color: var(--muted); }
+.card-desc { font-size: 12px; color: var(--muted); line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 2px; }
+.card-foot { display: flex; align-items: center; gap: 5px; padding: 2px 9px 9px 15px; flex-wrap: wrap; }
+.pill-tick { position: relative; }
+.pill-tick input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.pill-tick span {
+  display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 9px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--surface); font-size: 12px; font-weight: 650; color: var(--muted); white-space: nowrap;
 }
+.pill-tick span::before { content: ""; width: 12px; height: 12px; border-radius: 4px; border: 1.5px solid var(--faint); flex: none; }
+.pill-tick input:checked + span { color: var(--ink); border-color: color-mix(in oklab, var(--grid) 45%, var(--line)); background: color-mix(in oklab, var(--grid) 9%, var(--surface)); }
+.pill-tick input:checked + span::before { background: var(--grid); border-color: var(--grid); box-shadow: inset 0 0 0 2px var(--surface); }
+.pill-tick input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 2px; }
+.pill-tick small { font-size: 11px; font-weight: 600; color: var(--muted); }
+.card-link { margin-left: auto; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--focus); }
+div.pending-row { padding: 14px 16px; border: 1px dashed var(--line); border-radius: 12px; background: var(--surface); }
+.cards + .empty, .cards ~ .empty { padding: 28px 10px; text-align: center; color: var(--muted); }
+.add-empty-m { width: 100%; margin-top: 10px; }
 
-/* Seasons: rounds of applications. Season 1 is the archive of the first round. */
-.season-tabs { margin: 0 0 12px; }
-.season-tabs button span { margin-left: 7px; font-weight: 500; font-size: 12.5px; }
-.archive-note { margin: 0; max-width: 560px; }
+@media (max-width: 1100px) {
+  .kpis { margin-left: 0; width: 100%; }
+}
+@media (max-width: 760px) {
+  main.wide { padding: 12px 12px 110px; }
+  .log-head { gap: 10px; margin-bottom: 10px; }
+  .log-head h1 { font-size: 22px; flex: 1; }
+  .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+  .kpis > div { padding: 7px 10px; }
+  .kpis dt { font-size: 11px; white-space: normal; line-height: 1.2; }
+  .kpis dd { font-size: 18px; }
+  .kpis dd small { font-size: 11px; margin-left: 4px; }
+  .hide-xs { display: none; }
+  .add-bar { display: grid; grid-template-columns: 1fr 1fr; padding: 8px; gap: 8px; margin-bottom: 10px; }
+  .add-field { grid-column: 1 / -1; }
+  .add-field input { height: 44px; font-size: 16px; }
+  .paste-btn { top: 7px; }
+  .add-bar > .btn { height: 42px; padding: 0 8px; font-size: 14px; }
+  .log-tools { gap: 8px; }
+  .tone-chips { width: 100%; margin: 0 -12px; padding: 0 12px; width: calc(100% + 24px); }
+  .log-tools .search { width: 100%; margin: 0; height: 38px; font-size: 16px; }
+  #toast { bottom: calc(80px + env(safe-area-inset-bottom)); font-size: 13px; max-width: calc(100vw - 40px); width: auto; }
+  .archive-note { font-size: 13px; padding: 8px 12px; margin-bottom: 10px; }
+  .drawer .fields { grid-template-columns: 1fr 1fr; }
+  .drawer .fields > .field { min-width: 0; }
+  .drawer .fields input { min-width: 0; }
+  input, select, textarea { font-size: 16px; } /* stops iOS zooming in on focus */
+  .drawer-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+}

@@ -9,6 +9,8 @@ A personal job-search tracker that runs from anywhere:
 
 The web app is a static site in [`docs/`](docs/) (served by GitHub Pages). Data, auth and the scraper live in Supabase.
 
+On a phone the log becomes a list of cards with the three tick boxes on each card, and a **Paste** button fills the link box from the clipboard. Add the site to your home screen to use it like an app; on Android it then shows up in the share sheet, so sharing a LinkedIn job to it drops the link straight into the add box.
+
 ## How it fits together
 
 ```

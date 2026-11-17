@@ -37,9 +37,9 @@ const S = {
   cursor: 0,
   appsQuery: "",
   sort: { key: null, dir: 1 },   // null = the log's own order (oldest row first, like the Excel)
-  groupCollapsed: localGet("groupCollapsed", "0") === "1",
+  tone: null,                    // filter: pending | applied | positive | negative
+  pendingLink: null,             // a link shared to the app, waiting for Save for later / Already applied
   season: null,                  // which round of applications the log shows; null = the current one
-  zoom: localGet("zoom", innerWidth < 700 ? "0.85" : "0.9"),
   drawer: null,          // { type: 'app'|'company', id|null }
   detect: null,          // detection preview in Companies
   newCount: 0,
@@ -53,6 +53,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const safeUrl = (u) => (/^https?:\/\//i.test(u ?? "") ? esc(u) : "");
 const today = () => new Date().toISOString().slice(0, 10);
+const fold = (t) => String(t ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const daysBetween = (a, b = today()) => Math.round((new Date(b) - new Date(a)) / 86400000);
 function fmtDate(d) {
   if (!d) return "";
@@ -310,26 +311,33 @@ async function removeFromInbox(id, state) {
 }
 
 // ───────────────────────────── applications log ─────────────────────────────
-// A copy of the Excel "Applications Log": same columns, same tick boxes, same row colours, same metrics.
+// The Excel log's model, kept whole: Company, Position, Position Length, Location, Description, Date Posted,
+// Link, and the three tick boxes (Applied, Response Received, Positive Response) with their dates and the
+// response time. Layout: a full-width table on a computer, a card per row on a phone.
+// Tick + date pairs share a column so every column fits on a laptop screen without sideways scrolling.
 const COLS = [
-  { key: "company", label: "Company", kind: "text", w: 170 },
-  { key: "role", label: "Position", kind: "text", w: 330 },
-  { key: "contract", label: "Position Length", kind: "text", w: 104, list: "contracts" },
-  { key: "location", label: "Location", kind: "text", w: 116 },
-  { key: "description", label: "Description", kind: "long", w: 300 },
-  { key: "date_posted", label: "Date Posted", kind: "date", w: 98 },
-  { key: "url", label: "Link", kind: "link", w: 120 },
-  { key: "applied", label: "Applied", kind: "check", w: 76 },
-  { key: "applied_on", label: "Application Date", kind: "date", w: 104, group: true },
-  { key: "responded", label: "Response Received", kind: "check", w: 96, group: true },
-  { key: "response_on", label: "Response Date", kind: "date", w: 98, group: true },
-  { key: "wait", label: "Response Time (days)", kind: "calc", w: 98, group: true },
-  { key: "positive", label: "Positive Response", kind: "check", w: 88, group: true },
+  { key: "company", label: "Company", kind: "text", w: 140 },
+  { key: "role", label: "Position", kind: "text", w: 0 },        // 0 = shares the remaining width
+  { key: "contract", label: "Type", kind: "text", w: 92, list: "contracts", title: "Position Length" },
+  { key: "location", label: "Location", kind: "text", w: 104 },
+  { key: "description", label: "Description", kind: "long", w: 0 },
+  { key: "date_posted", label: "Posted", kind: "date", w: 82, title: "Date Posted" },
+  { key: "url", label: "Link", kind: "link", w: 52 },
+  { key: "applied", label: "Applied", kind: "applied", w: 100, title: "Applied · Application Date" },
+  { key: "responded", label: "Response", kind: "response", w: 132, title: "Response Received · Response Date · Response Time" },
+  { key: "positive", label: "Positive", kind: "check", w: 74, title: "Positive Response" },
 ];
 const CONTRACT_SUGGESTIONS = ["Stage", "CDI", "CDD", "VIE", "Alternance", "Graduate Program"];
+const TONES = [
+  { id: "pending", label: "To apply" },
+  { id: "applied", label: "Waiting" },
+  { id: "positive", label: "Positive" },
+  { id: "negative", label: "Negative" },
+];
+const mobileQuery = matchMedia("(max-width: 760px)");
 
 const responseDays = (a) => (a.applied_on && a.response_on ? daysBetween(a.applied_on, a.response_on) : null);
-// Row colour, in the Excel's rule order: negative response, positive response, applied, not applied.
+// Row colour follows the Excel's conditional formatting, in its rule order.
 function rowTone(a) {
   if (!a.company && !a.role) return "blank";
   if (a.responded && !a.positive) return "negative";
@@ -337,47 +345,64 @@ function rowTone(a) {
   if (a.applied) return "applied";
   return "pending";
 }
-function fmtSheetDate(d) {
+const toneLabel = (t) => TONES.find((x) => x.id === t)?.label ?? "";
+function shortDate(d) {
   if (!d) return "";
-  const [y, m, day] = d.slice(0, 10).split("-");
-  return `${day}/${m}/${y.slice(2)}`;
+  const dt = new Date(d.slice(0, 10) + "T12:00:00");
+  const sameYear = dt.getFullYear() === new Date().getFullYear();
+  return dt.toLocaleDateString("en-GB", { day: "numeric", month: "short", ...(sameYear ? {} : { year: "2-digit" }) });
 }
+const fmtSheetDate = shortDate;
+
 // Seasons are rounds of applications. Season 1 is the first round (the Excel); new rows go to the latest one.
 const currentSeason = () => Math.max(2, ...S.apps.map((a) => a.season ?? 2));
 const shownSeason = () => S.season ?? currentSeason();
 const seasonRows = (n = shownSeason()) => S.apps.filter((a) => (a.season ?? 2) === n);
+const rowNumber = (a) => seasonRows(a.season ?? 2).indexOf(a) + 1;
 function sheetRows() {
-  const q = S.appsQuery.trim().toLowerCase();
-  let list = seasonRows().filter((a) => !q || [a.company, a.role, a.location, a.description, a.contract, a.notes]
-    .some((v) => (v ?? "").toLowerCase().includes(q)));
+  const q = fold(S.appsQuery.trim());
+  let list = seasonRows().filter((a) => (!S.tone || rowTone(a) === S.tone) && (!q || [a.company, a.role, a.location, a.description, a.contract, a.notes]
+    .some((v) => fold(v).includes(q))));
   const { key, dir } = S.sort;
-  if (key) {
-    const val = (a) => (key === "wait" ? responseDays(a) ?? -1 : typeof a[key] === "boolean" ? Number(a[key]) : (a[key] ?? ""));
-    list = [...list].sort((a, b) => {
-      const va = val(a), vb = val(b);
-      return dir * (typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "fr", { numeric: true, sensitivity: "base" }));
-    });
-  }
-  return list;
+  if (!key) return [...list].reverse(); // newest first: what you just added is at the top
+  const val = (a) => {
+    if (key === "applied") return a.applied ? a.applied_on ?? "0" : "";
+    if (key === "responded") return a.responded ? a.response_on ?? "0" : "";
+    if (key === "positive") return Number(a.positive);
+    return a[key] ?? "";
+  };
+  return [...list].sort((a, b) => {
+    const va = val(a), vb = val(b);
+    return dir * (typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "fr", { numeric: true, sensitivity: "base" }));
+  });
 }
+
+// ── pieces shared by the table and the cards ──
+const tick = (a, key, label) =>
+  `<label class="tick" title="${label}"><input type="checkbox" data-check="${key}" ${a[key] ? "checked" : ""} aria-label="${label}"><span aria-hidden="true"></span></label>`;
+const dateBtn = (a, field, empty = "") =>
+  `<button type="button" class="date-btn ${a[field] ? "" : "is-empty"}" data-date="${field}" title="Change the date">${a[field] ? esc(shortDate(a[field])) : empty}</button>`;
+const ICON_OPEN = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>`;
+
 function cellHtml(a, c) {
   const v = a[c.key];
-  const grp = c.group ? " g" : "";
   switch (c.kind) {
     case "text":
-      return `<td class="c-text${grp}" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false"${c.list ? ` data-list="${c.list}"` : ""}>${esc(v)}</td>`;
+      return `<td class="c-${c.key}"><div class="ed" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</div></td>`;
     case "long":
-      return `<td class="c-long${grp}" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</td>`;
+      return `<td class="c-desc"><div class="ed clamp" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</div></td>`;
     case "date":
-      return `<td class="c-date${grp}" data-field="${c.key}" tabindex="0">${esc(fmtSheetDate(v))}</td>`;
+      return `<td class="c-date">${dateBtn(a, c.key)}</td>`;
     case "link":
-      return `<td class="c-link${grp}" data-field="url" tabindex="0">${v ? `<a href="${safeUrl(v)}" target="_blank" rel="noopener" title="${esc(v)}">${esc(v.replace(/^https?:\/\/(www\.)?/, ""))}</a>` : ""}</td>`;
-    case "check":
-      return `<td class="c-check${grp}"><input type="checkbox" data-check="${c.key}" ${v ? "checked" : ""} aria-label="${c.label}"></td>`;
-    case "calc": {
+      return `<td class="c-link">${v ? `<a class="open-link" href="${safeUrl(v)}" target="_blank" rel="noopener" title="${esc(v)}" aria-label="Open the posting">${ICON_OPEN}</a>` : ""}<button type="button" class="link-edit" data-edit-link title="${v ? "Change the link" : "Add a link"}">${v ? "✎" : "+"}</button></td>`;
+    case "applied":
+      return `<td class="c-tick">${tick(a, "applied", "Applied")}${a.applied ? dateBtn(a, "applied_on", "+ date") : ""}</td>`;
+    case "response": {
       const d = responseDays(a);
-      return `<td class="c-calc${grp}">${d === null ? "" : d.toFixed(2)}</td>`;
+      return `<td class="c-tick">${tick(a, "responded", "Response Received")}${a.responded ? dateBtn(a, "response_on", "+ date") : ""}${d !== null ? `<span class="days" title="Response time">${d} d</span>` : ""}</td>`;
     }
+    case "check":
+      return `<td class="c-tick">${tick(a, c.key, "Positive Response")}</td>`;
   }
   return "<td></td>";
 }
@@ -387,79 +412,113 @@ function rowHtml(a, n) {
     ${COLS.map((c) => cellHtml(a, c)).join("")}
   </tr>`;
 }
-const rowNumber = (a) => seasonRows(a.season ?? 2).indexOf(a) + 1;
-function metricsPanel() {
+// Phone: one card per row. Tap the text to edit everything; the three ticks work in place.
+function cardHtml(a, n) {
+  const d = responseDays(a);
+  const meta = [a.contract, a.location].filter(Boolean).map(esc).join(" · ");
+  return `<article class="card tone-${rowTone(a)}" data-row="${a.id}">
+    <button type="button" class="card-main" data-open="${a.id}">
+      <span class="card-top"><b class="co">${esc(a.company) || '<span class="faint">No company</span>'}</b><span class="n">#${n}</span></span>
+      ${a.role ? `<span class="card-role">${esc(a.role)}</span>` : ""}
+      ${meta || a.date_posted ? `<span class="card-meta">${meta}${a.date_posted ? `${meta ? " · " : ""}posted ${esc(shortDate(a.date_posted))}` : ""}</span>` : ""}
+      ${a.description ? `<span class="card-desc">${esc(a.description)}</span>` : ""}
+    </button>
+    <div class="card-foot">
+      <label class="pill-tick"><input type="checkbox" data-check="applied" ${a.applied ? "checked" : ""}><span>Applied${a.applied_on ? ` <small>${esc(shortDate(a.applied_on))}</small>` : ""}</span></label>
+      <label class="pill-tick"><input type="checkbox" data-check="responded" ${a.responded ? "checked" : ""}><span>Response${a.response_on ? ` <small>${esc(shortDate(a.response_on))}${d !== null ? ` · ${d} d` : ""}</small>` : ""}</span></label>
+      <label class="pill-tick"><input type="checkbox" data-check="positive" ${a.positive ? "checked" : ""}><span>Positive</span></label>
+      ${a.url ? `<a class="card-link" href="${safeUrl(a.url)}" target="_blank" rel="noopener" aria-label="Open the posting">${ICON_OPEN}</a>` : ""}
+    </div>
+  </article>`;
+}
+const itemHtml = (a) => (mobileQuery.matches ? cardHtml(a, rowNumber(a)) : rowHtml(a, rowNumber(a)));
+
+// The Excel's Performance Metrics, as a strip of figures instead of a side panel.
+function kpis() {
   const A = seasonRows();
   const filled = A.filter((a) => a.applied).length;
   const responses = A.filter((a) => a.responded).length;
   const positive = A.filter((a) => a.positive).length;
-  const pct = (n, d, digits) => (d ? `${((100 * n) / d).toFixed(digits)}%` : "0%");
-  const rows = [
-    ["Number of Applications Filled", filled],
-    ["Number of Responses", responses],
-    ["Response to Application Ratio", pct(responses, filled, 0)],
-    ["Number of Positive Responses", positive],
-    ["Positive Response to Application Ratio", pct(positive, filled, 1)],
-  ];
-  return `<table class="metrics"><thead><tr><th colspan="2">Performance Metrics</th></tr></thead>
-    <tbody>${rows.map(([l, v]) => `<tr><td>${l}</td><td>${v}</td></tr>`).join("")}</tbody></table>`;
+  const pct = (n, d, digits) => (d ? `${((100 * n) / d).toFixed(digits)}%` : "–");
+  const waits = A.map(responseDays).filter((d) => d !== null).sort((x, y) => x - y);
+  const median = waits.length ? waits[Math.floor(waits.length / 2)] : null;
+  return `<dl class="kpis">
+    <div><dt>Applications filled</dt><dd>${filled}</dd></div>
+    <div><dt>Responses</dt><dd>${responses}<small>${pct(responses, filled, 0)}</small></dd></div>
+    <div><dt>Positive responses</dt><dd>${positive}<small>${pct(positive, filled, 1)}</small></dd></div>
+    <div class="hide-xs"><dt>Typical reply time</dt><dd>${median === null ? "–" : `${median}<small>days</small>`}</dd></div>
+  </dl>`;
+}
+function toneChips() {
+  const A = seasonRows();
+  const count = (t) => A.filter((a) => rowTone(a) === t).length;
+  return `<div class="tone-chips" role="group" aria-label="Show">
+    <button data-tone="" aria-pressed="${!S.tone}">All <span>${A.length}</span></button>
+    ${TONES.map((t) => `<button data-tone="${t.id}" class="t-${t.id}" aria-pressed="${S.tone === t.id}"><i></i>${t.label} <span>${count(t.id)}</span></button>`).join("")}
+  </div>`;
 }
 function appsView() {
   const list = sheetRows();
-  const head = COLS.map((c) => {
-    const on = S.sort.key === c.key;
-    return `<th class="${c.group ? "g" : ""}" style="width:${c.w}px;min-width:${c.w}px" data-sort="${c.key}" aria-sort="${on ? (S.sort.dir > 0 ? "ascending" : "descending") : "none"}">
-      <span>${c.label}</span>${on ? `<i class="arrow">${S.sort.dir > 0 ? "▲" : "▼"}</i>` : ""}</th>`;
-  }).join("");
   const cur = currentSeason(), shown = shownSeason();
   const seasons = [...new Set([cur, ...S.apps.map((a) => a.season ?? 2)])].sort((a, b) => b - a);
   const archive = shown !== cur;
+  const mobile = mobileQuery.matches;
+  const head = COLS.map((c) => {
+    const on = S.sort.key === c.key;
+    return `<th class="h-${c.kind}" ${c.w ? `style="width:${c.w}px"` : ""} data-sort="${c.key}" title="${c.title ?? c.label}" aria-sort="${on ? (S.sort.dir > 0 ? "ascending" : "descending") : "none"}">${c.label}${on ? `<i class="arrow">${S.sort.dir > 0 ? "↑" : "↓"}</i>` : ""}</th>`;
+  }).join("");
+  const empty = seasonRows().length
+    ? `<div class="empty">No rows match. <button class="btn sm" data-act="clear-filters">Show all</button></div>`
+    : `<div class="empty"><h2>Season ${shown} is empty</h2><p>Paste a job link above. <b>Save for later</b> keeps it to apply when you have time; <b>Already applied</b> logs one you've just sent.</p></div>`;
   return `
-    <div class="page-head sheet-head">
-      <div class="grow"><h1>Applications Log</h1></div>
-      ${archive ? `<p class="sub archive-note">Season ${shown} is kept as a record. New rows go to Season ${cur}, and links you add are checked against every season.</p>` : `
-      <form id="link-form" class="link-form" autocomplete="off">
-        <input type="url" id="link-input" name="url" placeholder="Paste a job link" aria-label="Job posting link" required>
-        <button class="btn" type="submit" name="mode" value="later" title="Adds the row unticked, to apply when you have time">Save for later</button>
-        <button class="btn primary" type="submit" name="mode" value="applied" title="Adds the row with Applied ticked and today's date">Already applied</button>
-      </form>`}
+    <div class="log-head">
+      <h1>Applications</h1>
+      <div class="seg season-seg" role="group" aria-label="Season">${seasons.map((n) =>
+        `<button data-season="${n}" aria-pressed="${n === shown}">Season ${n}</button>`).join("")}</div>
+      ${kpis()}
     </div>
-    <div class="season-tabs seg" role="group" aria-label="Season">${seasons.map((n) =>
-      `<button data-season="${n}" aria-pressed="${n === shown}">Season ${n}<span class="faint">${seasonRows(n).length}</span></button>`).join("")}</div>
-    <div class="sheet-tools">
-      <input class="search" type="search" id="apps-q" placeholder="Search the log" value="${esc(S.appsQuery)}">
-      <button class="btn sm" data-act="toggle-group" aria-pressed="${S.groupCollapsed}">${S.groupCollapsed ? "Show" : "Hide"} response columns</button>
-      ${S.sort.key ? `<button class="btn sm ghost" data-act="clear-sort">Back to log order</button>` : ""}
-      <div class="spacer"></div>
-      <label class="zoom">Zoom <select id="zoom">${["0.6", "0.75", "0.85", "0.9", "1"].map((z) => `<option value="${z}" ${S.zoom === z ? "selected" : ""}>${Math.round(z * 100)}%</option>`).join("")}</select></label>
-      ${archive ? "" : `<button class="btn sm" data-act="add-row">Add empty row</button>`}
-    </div>
-    <div class="sheet-layout">
-      <div class="sheet-scroll" id="sheet-scroll">
-        <table class="sheet ${S.groupCollapsed ? "collapsed" : ""}" id="sheet" style="--zoom:${Number(S.zoom) || 1}">
-          <thead><tr><th class="gutter corner" aria-label="Row"></th>${head}</tr></thead>
-          <tbody id="sheet-body">${list.map((a) => rowHtml(a, rowNumber(a))).join("")}</tbody>
-        </table>
-        ${list.length ? "" : `<div class="empty">${seasonRows().length ? "No rows match the search." : `Season ${shown} is empty. Paste a job link above: <b>Save for later</b> adds it to apply when you have time, <b>Already applied</b> logs one you've just sent.`}</div>`}
+    ${archive ? `<p class="archive-note">Season ${shown} is the record of that round. New links go to Season ${cur} and are checked against every season.</p>` : `
+    <form id="link-form" class="add-bar" autocomplete="off">
+      <div class="add-field">
+        <input type="url" id="link-input" name="url" inputmode="url" placeholder="Paste a job link" aria-label="Job posting link" required value="${esc(S.pendingLink ?? "")}">
+        ${navigator.clipboard?.readText ? `<button type="button" class="paste-btn" data-act="paste">Paste</button>` : ""}
       </div>
-      <aside class="metrics-wrap" id="metrics">${metricsPanel()}</aside>
+      <button class="btn" type="submit" name="mode" value="later" title="Adds the row unticked, to apply when you have time">Save for later</button>
+      <button class="btn primary" type="submit" name="mode" value="applied" title="Adds the row with Applied ticked and today's date">Already applied</button>
+    </form>`}
+    <div class="log-tools">
+      ${toneChips()}
+      <input class="search" type="search" id="apps-q" placeholder="Search" value="${esc(S.appsQuery)}" aria-label="Search the log">
+      ${S.sort.key && !mobile ? `<button class="btn sm ghost" data-act="clear-sort">Newest first</button>` : ""}
+      ${archive || mobile ? "" : `<button class="btn sm ghost" data-act="add-row" title="Add a row to fill by hand">+ Empty row</button>`}
     </div>
-    <datalist id="contracts">${CONTRACT_SUGGESTIONS.map((c) => `<option value="${c}">`).join("")}</datalist>
-    <p class="faint small sheet-foot">Click any cell to edit it. Ticking Applied or Response Received stamps today's date; unticking clears it. The row number opens notes, contacts and history.</p>`;
+    ${mobile
+      ? `<div class="cards" id="rows">${list.map(itemHtml).join("")}</div>${list.length ? "" : empty}
+         ${archive ? "" : `<button class="btn ghost add-empty-m" data-act="add-row">+ Add a row by hand</button>`}`
+      : `<div class="log-scroll" id="log-scroll">
+          <table class="log" id="log">
+            <thead><tr><th class="gutter" aria-label="Row"></th>${head}</tr></thead>
+            <tbody id="rows">${list.map(itemHtml).join("")}</tbody>
+          </table>
+          ${list.length ? "" : empty}
+        </div>
+        <p class="faint small log-foot">Click a cell to edit it. Ticking Applied or Response stamps today's date (click the date to change it). The row number opens notes, contacts and history.</p>`}
+    <datalist id="contracts">${CONTRACT_SUGGESTIONS.map((c) => `<option value="${c}">`).join("")}</datalist>`;
 }
 
-// Re-draw one row in place (keeps scroll and focus elsewhere), plus the metrics.
+// Re-draw one row in place (keeps scroll and focus elsewhere), plus the figures above.
 function refreshRow(id) {
   const a = S.apps.find((x) => x.id === id);
-  const tr = document.querySelector(`tr[data-row="${id}"]`);
-  if (tr && a) {
-    const n = tr.querySelector(".gutter button")?.textContent ?? "";
-    const focusedField = document.activeElement?.closest(`tr[data-row="${id}"]`) ? document.activeElement.dataset.field : null;
-    tr.outerHTML = rowHtml(a, n);
-    if (focusedField) document.querySelector(`tr[data-row="${id}"] [data-field="${focusedField}"]`)?.focus();
+  const el = document.querySelector(`[data-row="${id}"]`);
+  if (el && a) {
+    const focusedField = document.activeElement?.closest(`[data-row="${id}"]`) ? document.activeElement.dataset.field : null;
+    el.outerHTML = itemHtml(a);
+    if (focusedField) document.querySelector(`[data-row="${id}"] [data-field="${focusedField}"]`)?.focus();
   }
-  const m = $("#metrics");
-  if (m) m.innerHTML = metricsPanel();
+  const k = $(".kpis");
+  if (k) k.outerHTML = kpis();
+  const t = $(".tone-chips");
+  if (t) t.outerHTML = toneChips();
 }
 async function savePatch(id, patch, quiet = false) {
   const { data, error } = await sb.from("applications").update(patch).eq("id", id).select().single();
@@ -468,34 +527,38 @@ async function savePatch(id, patch, quiet = false) {
   if (!quiet) refreshRow(id);
   return data;
 }
-async function commitCell(td) {
-  const id = Number(td.closest("tr").dataset.row);
-  const field = td.dataset.field;
+async function commitCell(ed) {
+  const id = Number(ed.closest("[data-row]").dataset.row);
+  const field = ed.dataset.field;
   const a = S.apps.find((x) => x.id === id);
-  let value = td.textContent.replace(/ /g, " ").trim();
+  let value = ed.textContent.replace(/ /g, " ").trim();
   if (field !== "description") value = value.replace(/\s+/g, " ");
   if ((a[field] ?? "") === value) return;
-  if (field === "company" && !value) { td.textContent = a.company; return toast("A row needs a company name."); }
+  if (field === "company" && !value) { ed.textContent = a.company; return toast("A row needs a company name."); }
   const data = await savePatch(id, { [field]: value || null }, true);
   if (data) {
-    const tr = td.closest("tr");
-    tr.className = `tone-${rowTone(data)}`;
+    ed.closest("tr").className = `tone-${rowTone(data)}`;
+    const k = $(".kpis");
+    if (k) k.outerHTML = kpis();
   }
 }
-function editDate(td) {
-  if (td.querySelector("input")) return;
-  const id = Number(td.closest("tr").dataset.row);
+function editDate(btn) {
+  const id = Number(btn.closest("[data-row]").dataset.row);
+  const field = btn.dataset.date;
   const a = S.apps.find((x) => x.id === id);
-  td.innerHTML = `<input type="date" value="${esc(a[td.dataset.field] ?? "")}">`;
-  const input = td.querySelector("input");
+  const input = document.createElement("input");
+  input.type = "date";
+  input.className = "date-input";
+  input.value = a[field] ?? "";
+  btn.replaceWith(input);
   input.focus();
-  try { input.showPicker?.(); } catch { /* not allowed without a click on some browsers */ }
+  try { input.showPicker?.(); } catch { /* some browsers only open it on a direct click */ }
   let done = false;
   const finish = async (save) => {
     if (done) return;
     done = true;
     const v = input.value || null;
-    if (save && v !== (a[td.dataset.field] ?? null)) await savePatch(id, { [td.dataset.field]: v });
+    if (save && v !== (a[field] ?? null)) await savePatch(id, { [field]: v });
     else refreshRow(id);
   };
   input.addEventListener("change", () => finish(true));
@@ -503,10 +566,9 @@ function editDate(td) {
   input.addEventListener("keydown", (e) => { if (e.key === "Escape") finish(false); if (e.key === "Enter") input.blur(); });
 }
 function editLink(td) {
-  if (td.querySelector("input")) return;
-  const id = Number(td.closest("tr").dataset.row);
+  const id = Number(td.closest("[data-row]").dataset.row);
   const a = S.apps.find((x) => x.id === id);
-  td.innerHTML = `<input type="url" value="${esc(a.url ?? "")}" placeholder="https://…">`;
+  td.innerHTML = `<input type="url" class="link-input" value="${esc(a.url ?? "")}" placeholder="https://…">`;
   const input = td.querySelector("input");
   input.focus();
   input.select();
@@ -521,9 +583,23 @@ function editLink(td) {
   input.addEventListener("blur", () => finish(true));
   input.addEventListener("keydown", (e) => { if (e.key === "Escape") finish(false); if (e.key === "Enter") input.blur(); });
 }
+// First link in a piece of text (LinkedIn's share sheet sends "Title … https://…").
+const firstUrl = (t) => (t ?? "").match(/https?:\/\/[^\s<>"']+/)?.[0]?.replace(/[).,;]+$/, "") ?? null;
+async function pasteLink() {
+  try {
+    const text = await navigator.clipboard.readText();
+    const url = firstUrl(text);
+    if (!url) return toast("There's no link on the clipboard.");
+    const input = $("#link-input");
+    input.value = url;
+    input.focus();
+  } catch {
+    toast("The browser didn't allow pasting. Long-press the box and paste instead.");
+    $("#link-input")?.focus();
+  }
+}
 
 // ── Has this job been logged before, in any season? ──
-const fold = (t) => (t ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 function urlKey(u) {
   try {
     const x = new URL(u);
@@ -573,11 +649,12 @@ async function addFromLink(raw, mode = "later") {
   const buttons = [...document.querySelectorAll("#link-form button")];
   if (input) { input.value = ""; input.disabled = true; }
   buttons.forEach((b) => { b.disabled = true; });
-  const pending = document.createElement("tr");
+  S.pendingLink = null;
+  const reading = `<span class="spinner"></span>Reading ${esc(new URL(url).hostname)}…`;
+  const pending = document.createElement(mobileQuery.matches ? "div" : "tr");
   pending.className = "pending-row";
-  pending.innerHTML = `<th class="gutter"></th><td colspan="${COLS.length}"><span class="spinner"></span>Reading ${esc(new URL(url).hostname)}…</td>`;
-  $("#sheet-body")?.appendChild(pending);
-  pending.scrollIntoView({ block: "nearest" });
+  pending.innerHTML = mobileQuery.matches ? reading : `<th class="gutter"></th><td colspan="${COLS.length}">${reading}</td>`;
+  $("#rows")?.prepend(pending);
   let row = { url }, note = "";
   try {
     const { data, error } = await sb.functions.invoke("extract", { body: { url } });
@@ -611,11 +688,13 @@ async function addFromLink(raw, mode = "later") {
   S.apps.push(data);
   S.sort = { key: null, dir: 1 };
   S.season = null;
+  S.tone = null;
+  S.appsQuery = "";
   render();
-  focusRow(data.id, note ? "company" : null);
-  const what = `${data.company}${data.role ? ` – ${data.role}` : ""}`;
-  toast(note ? `${note} The link is saved; fill in the rest.`
-    : mode === "applied" ? `Logged as applied today: ${what}` : `Saved for later: ${what}. Tick Applied once you've sent it.`);
+  focusRow(data.id, note && !mobileQuery.matches ? "company" : null);
+  if (note && mobileQuery.matches) openApp(data.id);
+  toast(note ? `${note} The link is saved.`
+    : mode === "applied" ? `Logged as applied: ${data.company}` : `Saved for later: ${data.company}`);
 }
 async function addEmptyRow() {
   const { data, error } = await sb.from("applications").insert({ company: "", season: currentSeason() }).select().single();
@@ -623,11 +702,13 @@ async function addEmptyRow() {
   S.apps.push(data);
   S.sort = { key: null, dir: 1 };
   S.season = null;
+  S.tone = null;
+  if (mobileQuery.matches) return openApp(data.id);
   render();
   focusRow(data.id, "company");
 }
 function focusRow(id, field) {
-  const tr = document.querySelector(`tr[data-row="${id}"]`);
+  const tr = document.querySelector(`[data-row="${id}"]`);
   if (!tr) return;
   tr.scrollIntoView({ block: "center" });
   tr.classList.add("flash");
@@ -822,16 +903,16 @@ function drawerHtml() {
       <button class="btn sm ghost" data-act="close" aria-label="Close">Close</button></div>
     <form class="drawer-body" id="app-form">
       <div class="fields">
-        ${f("company", "Company")}
-        <label class="field"><span>Position Length</span><input type="text" name="contract" list="contracts" value="${esc(a.contract ?? "")}"></label>
+        ${f("company", "Company", "text", "wide")}
         ${f("role", "Position", "text", "wide")}
-        ${f("location", "Location")}
-        ${f("date_posted", "Date Posted", "date")}
-        <label class="field wide"><span>Description</span><textarea name="description" rows="3">${esc(a.description ?? "")}</textarea></label>
-        ${f("url", "Link", "url", "wide")}
         <div class="checks wide">${chk("applied", "Applied")}${chk("responded", "Response Received")}${chk("positive", "Positive Response")}</div>
         ${f("applied_on", "Application Date", "date")}
         ${f("response_on", "Response Date", "date")}
+        <label class="field"><span>Position Length</span><input type="text" name="contract" list="contracts" value="${esc(a.contract ?? "")}"></label>
+        ${f("location", "Location")}
+        ${f("date_posted", "Date Posted", "date")}
+        ${f("url", "Link", "url")}
+        <label class="field wide"><span>Description</span><textarea name="description" rows="4">${esc(a.description ?? "")}</textarea></label>
         ${f("contact", "Contacts", "text", "wide")}
         ${f("next_step", "Next step", "text", "wide")}
         ${f("documents", "CV and cover letter sent", "text", "wide")}
@@ -969,14 +1050,9 @@ function bindView() {
   const qApps = $("#apps-q");
   if (qApps) qApps.addEventListener("input", () => {
     S.appsQuery = qApps.value;
-    const list = sheetRows();
-    $("#sheet-body").innerHTML = list.map((a) => rowHtml(a, rowNumber(a))).join("");
+    $("#rows").innerHTML = sheetRows().map(itemHtml).join("");
   });
-  $("#zoom")?.addEventListener("change", (e) => {
-    S.zoom = e.target.value;
-    localSet("zoom", S.zoom);
-    $("#sheet").style.setProperty("--zoom", S.zoom);
-  });
+  if (S.pendingLink) $("#link-input")?.focus();
   const linkForm = $("#link-form");
   if (linkForm) {
     // Enter saves for later; the second button logs it as already applied.
@@ -1013,7 +1089,7 @@ function bindView() {
 document.addEventListener("change", (e) => {
   const box = e.target.closest("input[data-check]");
   if (box) {
-    const id = Number(box.closest("tr").dataset.row);
+    const id = Number(box.closest("[data-row]").dataset.row);
     const patch = { [box.dataset.check]: box.checked };
     // Same logic as the Excel: a positive response is a response; no response means it can't be positive.
     if (box.dataset.check === "positive" && box.checked) patch.responded = true;
@@ -1022,40 +1098,44 @@ document.addEventListener("change", (e) => {
   }
 });
 
-// Sheet editing: text cells commit on blur or Enter; Escape puts the old value back.
+// Table editing: cells commit on blur or Enter; Escape puts the old value back.
 document.addEventListener("focusin", (e) => {
-  const td = e.target.closest?.("td[contenteditable]");
-  if (td) td.dataset.before = td.textContent;
+  const ed = e.target.closest?.(".ed[contenteditable]");
+  if (ed) ed.dataset.before = ed.textContent;
 });
 document.addEventListener("focusout", (e) => {
-  const td = e.target.closest?.("td[contenteditable]");
-  if (td && td.textContent !== td.dataset.before) commitCell(td);
+  const ed = e.target.closest?.(".ed[contenteditable]");
+  if (ed && ed.textContent !== ed.dataset.before) commitCell(ed);
 });
 document.addEventListener("keydown", (e) => {
-  const td = e.target.closest?.("td[contenteditable]");
-  if (!td) return;
-  if (e.key === "Enter" && !(e.shiftKey && td.classList.contains("c-long"))) { e.preventDefault(); td.blur(); }
-  if (e.key === "Escape") { td.textContent = td.dataset.before ?? ""; td.blur(); }
+  const ed = e.target.closest?.(".ed[contenteditable]");
+  if (!ed) return;
+  if (e.key === "Enter" && !(e.shiftKey && ed.dataset.field === "description")) { e.preventDefault(); ed.blur(); }
+  if (e.key === "Escape") { ed.textContent = ed.dataset.before ?? ""; ed.blur(); }
 }, true);
 document.addEventListener("paste", (e) => {
   // Keep pasted text plain in browsers without plaintext-only editing.
-  const td = e.target.closest?.("td[contenteditable]");
+  const td = e.target.closest?.(".ed[contenteditable]");
   if (!td) return;
   e.preventDefault();
   document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
 });
 
 document.addEventListener("click", async (e) => {
-  const dateCell = e.target.closest("td.c-date");
-  if (dateCell && !e.target.closest("input")) return editDate(dateCell);
-  const linkCell = e.target.closest("td.c-link");
-  if (linkCell && !e.target.closest("a, input")) return editLink(linkCell);
-  const el = e.target.closest("[data-act], [data-inbox-tab], [data-open], [data-season], [data-sort], [data-chip-remove], .post[data-i]");
+  const dateBtnEl = e.target.closest("button[data-date]");
+  if (dateBtnEl) return editDate(dateBtnEl);
+  if (e.target.closest("[data-edit-link]")) return editLink(e.target.closest("td"));
+  const el = e.target.closest("[data-act], [data-inbox-tab], [data-open], [data-season], [data-tone], [data-sort], [data-chip-remove], .post[data-i]");
   if (!el) return;
+  if (el.dataset.tone !== undefined) {
+    S.tone = el.dataset.tone && S.tone !== el.dataset.tone ? el.dataset.tone : null;
+    return render();
+  }
   if (el.dataset.season) {
     const n = Number(el.dataset.season);
     S.season = n === currentSeason() ? null : n;
     S.appsQuery = "";
+    S.tone = null;
     return render();
   }
   if (el.dataset.chipRemove) {
@@ -1069,9 +1149,9 @@ document.addEventListener("click", async (e) => {
     // Click a header: A→Z, then Z→A, then back to the log's own order.
     const k = el.dataset.sort;
     S.sort = S.sort.key !== k ? { key: k, dir: 1 } : S.sort.dir > 0 ? { key: k, dir: -1 } : { key: null, dir: 1 };
-    const scroll = $("#sheet-scroll")?.scrollLeft ?? 0;
+    const scroll = $("#log-scroll")?.scrollLeft ?? 0;
     render();
-    $("#sheet-scroll").scrollLeft = scroll;
+    if ($("#log-scroll")) $("#log-scroll").scrollLeft = scroll;
     return;
   }
   if (el.matches(".post[data-i]") && !el.dataset.act) {
@@ -1107,10 +1187,8 @@ document.addEventListener("click", async (e) => {
     case "save-detected": return saveDetected();
     case "add-row": return addEmptyRow();
     case "clear-sort": S.sort = { key: null, dir: 1 }; return render();
-    case "toggle-group":
-      S.groupCollapsed = !S.groupCollapsed;
-      localSet("groupCollapsed", S.groupCollapsed ? "1" : "0");
-      return render();
+    case "clear-filters": S.tone = null; S.appsQuery = ""; return render();
+    case "paste": return pasteLink();
     case "save-app": return saveApp();
     case "delete-app": return deleteApp();
     case "add-note": return addNote();
@@ -1150,6 +1228,21 @@ async function route() {
 }
 window.addEventListener("hashchange", route);
 
+// Switching between phone and computer layouts (rotating a tablet, resizing a window).
+mobileQuery.addEventListener("change", () => { if (S.user && S.view === "applications" && !S.drawer) render(); });
+
+// A link shared to the installed app (Android share sheet) or opened as ?add=<link>: keep it ready in the add box.
+(function takeSharedLink() {
+  const q = new URLSearchParams(location.search);
+  const shared = firstUrl([q.get("url"), q.get("text"), q.get("add"), q.get("title")].filter(Boolean).join(" "));
+  try {
+    if (shared) sessionStorage.setItem("jt:shared", shared);
+    S.pendingLink = sessionStorage.getItem("jt:shared");
+    sessionStorage.removeItem("jt:shared");
+  } catch { S.pendingLink = shared; }
+  if (shared) history.replaceState(null, "", location.pathname + "#applications");
+})();
+
 // ───────────────────────────── boot ─────────────────────────────
 async function start(session) {
   S.user = session?.user ?? null;
@@ -1163,6 +1256,7 @@ async function start(session) {
   }
   try { await loadCore(); } catch (err) { return fail(err, "Couldn't load your data"); }
   route();
+  if (S.pendingLink) toast("Link ready: choose Save for later or Already applied.");
 }
 let booted = false;
 sb.auth.onAuthStateChange((event, session) => {
