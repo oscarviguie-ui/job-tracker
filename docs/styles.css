@@ -308,3 +308,118 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ── Applications Log: the Excel sheet, kept as it was ──
+   Colours are the workbook's own: header in Office "Dark Blue 2, lighter 90%", rows tinted by the
+   same conditional-formatting rules (not applied → pink, applied → light green, positive → green,
+   negative → salmon). The sheet stays light in dark mode, like a page on a desk. */
+main.wide { max-width: none; padding-left: 16px; padding-right: 16px; }
+.sheet-head { align-items: center; flex-wrap: wrap; }
+.link-form { display: flex; gap: 8px; flex: 1 1 460px; max-width: 720px; }
+.link-form input { flex: 1; min-width: 0; height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--surface); }
+.link-form input:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+.link-form button { height: 40px; white-space: nowrap; }
+.sheet-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+.sheet-tools .search { width: 240px; max-width: 100%; }
+.sheet-tools .spacer { flex: 1; }
+
+.sheet-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+.sheet { zoom: var(--zoom, 1); }
+.zoom { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.zoom select { height: 30px; padding: 0 6px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--surface); }
+.sheet-scroll {
+  --xl-ink: #000; --xl-grid: #000; --xl-head: #DCEAF7;
+  overflow: auto; max-height: calc(100dvh - 210px); background: #fff; color: var(--xl-ink);
+  border: 2px solid var(--xl-grid); border-radius: 2px; color-scheme: light;
+}
+.sheet {
+  border-collapse: separate; border-spacing: 0; table-layout: fixed; width: max-content;
+  font-family: "Aptos Narrow", "Archivo Narrow", "Arial Narrow", sans-serif; font-size: 14.5px; line-height: 1.25;
+}
+.sheet th, .sheet td {
+  border-right: 1px solid var(--xl-grid); border-bottom: 1px solid var(--xl-grid);
+  padding: 6px 8px; text-align: center; vertical-align: middle; background: inherit;
+}
+.sheet thead th {
+  position: sticky; top: 0; z-index: 3; background: var(--xl-head); color: #000; font-weight: 700; font-size: 15.5px;
+  border-bottom: 2px solid var(--xl-grid); cursor: pointer; user-select: none; height: 46px; white-space: normal;
+}
+.sheet thead th:hover { background: #C9DDF1; }
+.sheet thead th .arrow { font-style: normal; font-size: 10px; margin-left: 4px; vertical-align: 1px; color: #000; }
+.sheet .gutter {
+  position: sticky; left: 0; z-index: 2; width: 38px; min-width: 38px; padding: 0; background: #F3F3F3;
+  color: #555; font: 500 12px/1 var(--font); border-right: 2px solid var(--xl-grid);
+}
+.sheet thead .gutter { z-index: 4; cursor: default; background: #F3F3F3; }
+.sheet .gutter button {
+  all: unset; display: block; width: 100%; height: 100%; min-height: 32px; text-align: center; cursor: pointer;
+}
+.sheet .gutter button:hover, .sheet .gutter button:focus-visible { background: #E2E2E2; color: #000; }
+.sheet tbody tr > :nth-child(2) { position: sticky; left: 38px; z-index: 1; }
+.sheet thead tr > :nth-child(2) { position: sticky; left: 38px; z-index: 4; }
+
+/* conditional formatting, in the workbook's rule order */
+.sheet tbody tr { background: #fff; }
+.sheet tr.tone-pending { background: #FFE5E5; color: #660033; }
+.sheet tr.tone-applied { background: #D9F2D0; color: #275417; }
+.sheet tr.tone-positive { background: #8ED973; color: #000; }
+.sheet tr.tone-negative { background: #FF7C80; color: #000; }
+.sheet tbody tr > td:first-of-type { background: inherit; }
+.sheet tbody tr.flash > td { animation: flash 1.6s ease-out; }
+@keyframes flash { 0%, 30% { box-shadow: inset 0 0 0 999px rgba(79, 123, 232, .28); } 100% { box-shadow: inset 0 0 0 999px transparent; } }
+
+.sheet td[contenteditable] { cursor: text; outline: none; overflow-wrap: anywhere; }
+.sheet td[contenteditable]:focus { box-shadow: inset 0 0 0 2px #217346; background: #fff; color: #000; }
+.sheet td.c-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sheet td.c-text:focus { white-space: normal; overflow: visible; }
+.sheet td.c-long { white-space: pre-wrap; text-align: center; }
+.sheet td.c-date, .sheet td.c-link { cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sheet td.c-date:focus-visible, .sheet td.c-link:focus-visible { box-shadow: inset 0 0 0 2px #217346; outline: none; }
+.sheet td.c-link { overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+.sheet td.c-link a { color: #467886; text-decoration: underline; }
+.sheet td input[type="date"], .sheet td input[type="url"] {
+  width: 100%; min-width: 0; border: 0; padding: 2px; background: #fff; color: #000; font: inherit; text-align: center; outline: 2px solid #217346;
+}
+.sheet td input[type="url"] { min-width: 260px; text-align: left; position: relative; z-index: 2; }
+.sheet td.c-calc { font-variant-numeric: tabular-nums; }
+.sheet td.c-check input {
+  appearance: none; -webkit-appearance: none; width: 17px; height: 17px; margin: 0; vertical-align: middle; cursor: pointer;
+  border: 1.5px solid currentColor; border-radius: 3px; background: #fff; display: inline-grid; place-content: center;
+}
+.sheet td.c-check input::after { content: ""; width: 9px; height: 5px; border: solid #fff; border-width: 0 0 2px 2px; transform: rotate(-45deg) translate(1px, -1px); opacity: 0; }
+.sheet td.c-check input:checked { background: #217346; border-color: #217346; }
+.sheet td.c-check input:checked::after { opacity: 1; }
+.sheet td.c-check input:focus-visible { outline: 2px solid #217346; outline-offset: 2px; }
+.sheet.collapsed .g { display: none; }
+.sheet .pending-row td { text-align: left; color: #444; background: #fff; font-family: var(--font); }
+.spinner { display: inline-block; width: 12px; height: 12px; margin-right: 8px; vertical-align: -1px; border: 2px solid #c8c8c8; border-top-color: #217346; border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.sheet-scroll .empty { font-family: var(--font); color: #555; }
+
+/* Performance Metrics block, as in columns P:Q */
+.metrics-wrap { position: sticky; top: 72px; }
+.metrics {
+  width: 100%; border-collapse: collapse; background: #fff; color: #000; color-scheme: light;
+  font-family: "Aptos Narrow", "Archivo Narrow", "Arial Narrow", sans-serif; font-size: 15px; border: 2px solid #000;
+}
+.metrics th { background: #DCEAF7; color: #000; font-size: 16px; font-weight: 700; text-align: center; padding: 9px 8px; border-bottom: 2px solid #000; white-space: normal; }
+.metrics td { padding: 7px 10px; border-bottom: 1px solid #000; }
+.metrics td:first-child { border-right: 1px solid #000; }
+.metrics td:last-child { text-align: center; font-variant-numeric: tabular-nums; width: 90px; font-size: 16px; }
+.sheet-foot { margin: 10px 0 0; }
+
+.drawer .checks { display: flex; gap: 18px; flex-wrap: wrap; padding: 4px 0; }
+
+@media (max-width: 1280px) {
+  .sheet-layout { grid-template-columns: 1fr; }
+  .metrics-wrap { position: static; order: -1; max-width: 520px; }
+}
+@media (max-width: 640px) {
+  main.wide { padding-left: 10px; padding-right: 10px; }
+  .link-form { flex-basis: 100%; flex-direction: column; }
+  .link-form button { width: 100%; }
+  .sheet-scroll { max-height: calc(100dvh - 250px); }
+  .sheet { font-size: 14px; }
+  .sheet tbody tr > :nth-child(2), .sheet thead tr > :nth-child(2) { max-width: 130px; width: 130px; min-width: 130px; }
+  .metrics { font-size: 14px; }
+}

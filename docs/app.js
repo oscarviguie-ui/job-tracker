@@ -4,20 +4,19 @@ import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ───────────────────────────── vocabulary ─────────────────────────────
+// Statuses only describe a combination of the log's tick boxes; they label the history in the record panel.
 const STATUSES = [
-  { id: "saved", label: "To apply", open: true },
-  { id: "applied", label: "Applied", open: true },
-  { id: "interview", label: "Interviewing", open: true },
-  { id: "offer", label: "Offer", open: true },
-  { id: "accepted", label: "Accepted", open: false },
-  { id: "rejected", label: "Rejected", open: false },
-  { id: "no_response", label: "No response", open: false },
-  { id: "withdrawn", label: "Withdrawn", open: false },
-  { id: "skipped", label: "Not pursued", open: false },
+  { id: "saved", label: "Not applied" },
+  { id: "applied", label: "Applied" },
+  { id: "interview", label: "Positive response" },
+  { id: "offer", label: "Offer" },
+  { id: "accepted", label: "Accepted" },
+  { id: "rejected", label: "Negative response" },
+  { id: "no_response", label: "Applied" },
+  { id: "withdrawn", label: "Withdrawn" },
+  { id: "skipped", label: "Not applied" },
 ];
 const STATUS = Object.fromEntries(STATUSES.map((s) => [s.id, s]));
-const LIGHT_STATUSES = new Set(["saved", "interview", "no_response", "withdrawn", "skipped"]);
-const CONTRACTS = ["Stage", "CDI", "CDD", "VIE", "Graduate", "Alternance", "Freelance"];
 const ATS_LABEL = {
   workday: "Workday", smartrecruiters: "SmartRecruiters", greenhouse: "Greenhouse", lever: "Lever", ashby: "Ashby",
   recruitee: "Recruitee", teamtailor: "Teamtailor", personio: "Personio", oracle: "Oracle", successfactors: "SuccessFactors",
@@ -27,7 +26,7 @@ const ATS_LABEL = {
 // ───────────────────────────── state ─────────────────────────────
 const S = {
   user: null,
-  view: "inbox",
+  view: "applications",
   companies: [],
   apps: [],
   settings: null,
@@ -37,9 +36,9 @@ const S = {
   inboxCompany: "",
   cursor: 0,
   appsQuery: "",
-  appsStatus: null,      // status filter from the mix bar
-  appsView: localGet("appsView", "table"),
-  sort: { key: "updated_at", dir: -1 },
+  sort: { key: null, dir: 1 },   // null = the log's own order (oldest row first, like the Excel)
+  groupCollapsed: localGet("groupCollapsed", "0") === "1",
+  zoom: localGet("zoom", innerWidth < 700 ? "0.85" : "0.9"),
   drawer: null,          // { type: 'app'|'company', id|null }
   detect: null,          // detection preview in Companies
   newCount: 0,
@@ -82,16 +81,12 @@ function fail(error, what) {
   console.error(error);
   toast(`${what}: ${error.message ?? error}`);
 }
-const statusSelect = (value, attrs = "") =>
-  `<select class="status-select" style="--c: var(--s-${value})" ${attrs} aria-label="Status">${STATUSES.map(
-    (s) => `<option value="${s.id}" ${s.id === value ? "selected" : ""}>${s.label}</option>`,
-  ).join("")}</select>`;
 
 // ───────────────────────────── data ─────────────────────────────
 async function loadCore() {
   const [c, a, s, n] = await Promise.all([
     sb.from("companies").select("*").order("name"),
-    sb.from("applications").select("*").order("updated_at", { ascending: false }),
+    sb.from("applications").select("*").order("id", { ascending: true }),
     sb.from("settings").select("*").eq("id", 1).single(),
     sb.from("postings").select("id", { count: "exact", head: true }).eq("state", "new").eq("matched", true).eq("is_open", true),
   ]);
@@ -134,14 +129,14 @@ function shell(content) {
     <header class="topbar"><div class="topbar-inner">
       <div class="brand">${LOGO}<span>Job Tracker</span></div>
       <nav class="nav" aria-label="Sections">
-        ${tab("inbox", "Inbox", S.newCount ? `<span class="count">${S.newCount > 99 ? "99+" : S.newCount}</span>` : "")}
         ${tab("applications", "Applications")}
+        ${tab("inbox", "Inbox", S.newCount ? `<span class="count">${S.newCount > 99 ? "99+" : S.newCount}</span>` : "")}
         ${tab("companies", "Companies")}
         ${tab("settings", "Settings")}
       </nav>
       <div class="spacer"></div>
     </div></header>
-    <main id="main">${content}</main>
+    <main id="main" class="${S.view === "applications" ? "wide" : ""}">${content}</main>
   </div>${S.drawer ? drawerHtml() : ""}`;
 }
 
@@ -149,7 +144,7 @@ async function render() {
   const app = $("#app");
   if (!S.user) { app.innerHTML = authView(); bindAuth(); return; }
   const views = { inbox: inboxView, applications: appsView, companies: companiesView, settings: settingsView };
-  app.innerHTML = shell((views[S.view] ?? inboxView)());
+  app.innerHTML = shell((views[S.view] ?? appsView)());
   bindView();
 }
 
@@ -269,21 +264,29 @@ async function trackPosting(id) {
   if (!p) return;
   const { data, error } = await sb.from("applications").insert({
     company: p.companies?.name ?? "", company_id: p.company_id, posting_id: p.id, role: p.title,
-    location: p.location, url: p.url, date_posted: p.posted_at, status: "saved",
-    contract: guessContract(p.title),
+    location: p.location, url: p.url, date_posted: p.posted_at, contract: guessContract(p.title),
   }).select().single();
   if (error) return fail(error, "Couldn't track it");
   await sb.from("postings").update({ state: "tracked", application_id: data.id }).eq("id", id);
-  S.apps.unshift(data);
+  S.apps.push(data);
   removeFromInbox(id, "tracked");
-  toast(`Tracked: ${p.title}`);
+  toast(`Added to the log: ${p.title}`);
+  // Fill Description (and anything else missing) from the posting page, in the background.
+  try {
+    const { data: x } = await sb.functions.invoke("extract", { body: { url: p.url } });
+    if (x?.ok) {
+      const patch = {};
+      for (const k of ["description", "contract", "location", "date_posted"]) if (!data[k] && x.row[k]) patch[k] = x.row[k];
+      if (Object.keys(patch).length) await savePatch(data.id, patch, true);
+    }
+  } catch { /* the row is there either way */ }
 }
 function guessContract(t = "") {
   const s = t.toLowerCase();
   if (/\bv\.?i\.?e\b/.test(s)) return "VIE";
   if (/stag|intern/.test(s)) return "Stage";
   if (/altern|apprenti/.test(s)) return "Alternance";
-  if (/graduate|jeune dipl/.test(s)) return "Graduate";
+  if (/graduate|jeune dipl/.test(s)) return "Graduate Program";
   if (/\bcdd\b|fixed[- ]term/.test(s)) return "CDD";
   if (/\bcdi\b/.test(s)) return "CDI";
   return null;
@@ -305,121 +308,262 @@ async function removeFromInbox(id, state) {
   render();
 }
 
-// ───────────────────────────── applications ─────────────────────────────
-function appsFiltered() {
-  const q = S.appsQuery.toLowerCase();
-  let list = S.apps.filter((a) => (!S.appsStatus || a.status === S.appsStatus)
-    && (!q || [a.company, a.role, a.location, a.notes, a.contract].some((v) => (v ?? "").toLowerCase().includes(q))));
+// ───────────────────────────── applications log ─────────────────────────────
+// A copy of the Excel "Applications Log": same columns, same tick boxes, same row colours, same metrics.
+const COLS = [
+  { key: "company", label: "Company", kind: "text", w: 170 },
+  { key: "role", label: "Position", kind: "text", w: 330 },
+  { key: "contract", label: "Position Length", kind: "text", w: 104, list: "contracts" },
+  { key: "location", label: "Location", kind: "text", w: 116 },
+  { key: "description", label: "Description", kind: "long", w: 300 },
+  { key: "date_posted", label: "Date Posted", kind: "date", w: 98 },
+  { key: "url", label: "Link", kind: "link", w: 120 },
+  { key: "applied", label: "Applied", kind: "check", w: 76 },
+  { key: "applied_on", label: "Application Date", kind: "date", w: 104, group: true },
+  { key: "responded", label: "Response Received", kind: "check", w: 96, group: true },
+  { key: "response_on", label: "Response Date", kind: "date", w: 98, group: true },
+  { key: "wait", label: "Response Time (days)", kind: "calc", w: 98, group: true },
+  { key: "positive", label: "Positive Response", kind: "check", w: 88, group: true },
+];
+const CONTRACT_SUGGESTIONS = ["Stage", "CDI", "CDD", "VIE", "Alternance", "Graduate Program"];
+
+const responseDays = (a) => (a.applied_on && a.response_on ? daysBetween(a.applied_on, a.response_on) : null);
+// Row colour, in the Excel's rule order: negative response, positive response, applied, not applied.
+function rowTone(a) {
+  if (!a.company && !a.role) return "blank";
+  if (a.responded && !a.positive) return "negative";
+  if (a.positive) return "positive";
+  if (a.applied) return "applied";
+  return "pending";
+}
+function fmtSheetDate(d) {
+  if (!d) return "";
+  const [y, m, day] = d.slice(0, 10).split("-");
+  return `${day}/${m}/${y.slice(2)}`;
+}
+function sheetRows() {
+  const q = S.appsQuery.trim().toLowerCase();
+  let list = S.apps.filter((a) => !q || [a.company, a.role, a.location, a.description, a.contract, a.notes]
+    .some((v) => (v ?? "").toLowerCase().includes(q)));
   const { key, dir } = S.sort;
-  list = [...list].sort((a, b) => {
-    const va = a[key] ?? "", vb = b[key] ?? "";
-    if (key === "status") return dir * (STATUSES.findIndex((s) => s.id === va) - STATUSES.findIndex((s) => s.id === vb));
-    return dir * String(va).localeCompare(String(vb), "fr", { numeric: true });
-  });
+  if (key) {
+    const val = (a) => (key === "wait" ? responseDays(a) ?? -1 : typeof a[key] === "boolean" ? Number(a[key]) : (a[key] ?? ""));
+    list = [...list].sort((a, b) => {
+      const va = val(a), vb = val(b);
+      return dir * (typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "fr", { numeric: true, sensitivity: "base" }));
+    });
+  }
   return list;
 }
-function followUpDue(a) {
-  if (a.follow_up_on && a.follow_up_on <= today() && STATUS[a.status]?.open) return "Follow up today";
-  if (a.status === "applied" && a.applied_on && daysBetween(a.applied_on) >= (S.settings?.follow_up_days ?? 14)) {
-    return `No reply in ${daysBetween(a.applied_on)} days`;
+function cellHtml(a, c) {
+  const v = a[c.key];
+  const grp = c.group ? " g" : "";
+  switch (c.kind) {
+    case "text":
+      return `<td class="c-text${grp}" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false"${c.list ? ` data-list="${c.list}"` : ""}>${esc(v)}</td>`;
+    case "long":
+      return `<td class="c-long${grp}" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</td>`;
+    case "date":
+      return `<td class="c-date${grp}" data-field="${c.key}" tabindex="0">${esc(fmtSheetDate(v))}</td>`;
+    case "link":
+      return `<td class="c-link${grp}" data-field="url" tabindex="0">${v ? `<a href="${safeUrl(v)}" target="_blank" rel="noopener" title="${esc(v)}">${esc(v.replace(/^https?:\/\/(www\.)?/, ""))}</a>` : ""}</td>`;
+    case "check":
+      return `<td class="c-check${grp}"><input type="checkbox" data-check="${c.key}" ${v ? "checked" : ""} aria-label="${c.label}"></td>`;
+    case "calc": {
+      const d = responseDays(a);
+      return `<td class="c-calc${grp}">${d === null ? "" : d.toFixed(2)}</td>`;
+    }
   }
-  return "";
+  return "<td></td>";
 }
-function metrics() {
+function rowHtml(a, n) {
+  return `<tr data-row="${a.id}" class="tone-${rowTone(a)}">
+    <th class="gutter" scope="row"><button data-open="${a.id}" title="Open the full record: notes, contacts, history">${n}</button></th>
+    ${COLS.map((c) => cellHtml(a, c)).join("")}
+  </tr>`;
+}
+function metricsPanel() {
   const A = S.apps;
-  const submitted = A.filter((a) => !["saved", "skipped"].includes(a.status));
-  const responded = submitted.filter((a) => ["interview", "offer", "accepted", "rejected"].includes(a.status));
-  const positive = submitted.filter((a) => ["interview", "offer", "accepted"].includes(a.status));
-  const waits = submitted.filter((a) => a.applied_on && a.response_on).map((a) => daysBetween(a.applied_on, a.response_on)).sort((x, y) => x - y);
-  const median = waits.length ? waits[Math.floor(waits.length / 2)] : null;
-  const pct = (n, d) => (d ? Math.round((100 * n) / d) + "%" : "–");
-  const due = A.filter(followUpDue).length;
-  return [
-    [submitted.length, "applications sent"],
-    [pct(responded.length, submitted.length), `got a reply (${responded.length})`],
-    [pct(positive.length, submitted.length), `led to interviews (${positive.length})`],
-    [median === null ? "–" : `${median} d`, "median wait for a reply"],
-    [due, due === 1 ? "follow-up due" : "follow-ups due"],
+  const filled = A.filter((a) => a.applied).length;
+  const responses = A.filter((a) => a.responded).length;
+  const positive = A.filter((a) => a.positive).length;
+  const pct = (n, d, digits) => (d ? `${((100 * n) / d).toFixed(digits)}%` : "0%");
+  const rows = [
+    ["Number of Applications Filled", filled],
+    ["Number of Responses", responses],
+    ["Response to Application Ratio", pct(responses, filled, 0)],
+    ["Number of Positive Responses", positive],
+    ["Positive Response to Application Ratio", pct(positive, filled, 1)],
   ];
-}
-function mixBar() {
-  const counts = STATUSES.map((s) => ({ ...s, n: S.apps.filter((a) => a.status === s.id).length })).filter((s) => s.n);
-  if (!counts.length) return "";
-  return `<div class="mix ${S.appsStatus ? "filtered" : ""}">
-    <div class="mix-bar" role="group" aria-label="Applications by status">
-      ${counts.map((s) => `<button class="mix-seg" style="--n:${s.n}; --c: var(--s-${s.id})" ${LIGHT_STATUSES.has(s.id) ? "data-light" : ""}
-        data-status="${s.id}" aria-pressed="${S.appsStatus === s.id}" title="${s.label}: ${s.n}"><span>${s.n}</span></button>`).join("")}
-    </div>
-    <div class="mix-legend">
-      ${counts.map((s) => `<button data-status="${s.id}" aria-pressed="${S.appsStatus === s.id}"><span class="pill" style="--c: var(--s-${s.id})">${s.label}</span><b>${s.n}</b></button>`).join("")}
-      ${S.appsStatus ? `<button data-status="">Show all</button>` : ""}
-    </div>
-  </div>`;
+  return `<table class="metrics"><thead><tr><th colspan="2">Performance Metrics</th></tr></thead>
+    <tbody>${rows.map(([l, v]) => `<tr><td>${l}</td><td>${v}</td></tr>`).join("")}</tbody></table>`;
 }
 function appsView() {
-  const list = appsFiltered();
-  const th = (key, label, cls = "") => {
-    const on = S.sort.key === key;
-    return `<th class="sortable ${cls}" data-sort="${key}">${label}${on ? `<span class="arrow">${S.sort.dir > 0 ? "↑" : "↓"}</span>` : ""}</th>`;
-  };
-  let body;
-  if (!S.apps.length) {
-    body = `<div class="table-wrap"><div class="empty"><h2>No applications yet</h2><p>Track a posting from the Inbox or add one by hand.</p><button class="btn primary" data-act="new-app">Add application</button></div></div>`;
-  } else if (S.appsView === "board") {
-    body = boardHtml(list);
-  } else {
-    body = `<div class="table-wrap"><table class="stack">
-      <thead><tr>${th("company", "Company")}${th("role", "Role")}${th("contract", "Type", "hide-m")}${th("location", "Location", "hide-m")}${th("status", "Status")}${th("applied_on", "Applied", "num")}<th class="hide-m">Follow-up</th></tr></thead>
-      <tbody>${list.map((a) => {
-        const due = followUpDue(a);
-        return `<tr class="clickable" data-app="${a.id}">
-          <td class="co">${esc(a.company)}</td>
-          <td class="role"><span class="t">${esc(a.role) || '<span class="faint">No role</span>'}</span></td>
-          <td class="hide-m">${esc(a.contract)}</td>
-          <td class="hide-m muted">${esc(a.location)}</td>
-          <td class="status-cell">${statusSelect(a.status, `data-status-of="${a.id}"`)}</td>
-          <td class="num">${a.applied_on ? esc(fmtDate(a.applied_on)) : ""}</td>
-          <td class="flag-cell">${due ? `<span class="flag">${esc(due)}</span>` : ""}</td>
-        </tr>`;
-      }).join("")}</tbody></table>
-      ${list.length ? "" : `<div class="empty">No applications match.</div>`}
-    </div>`;
-  }
+  const list = sheetRows();
+  const head = COLS.map((c) => {
+    const on = S.sort.key === c.key;
+    return `<th class="${c.group ? "g" : ""}" style="width:${c.w}px;min-width:${c.w}px" data-sort="${c.key}" aria-sort="${on ? (S.sort.dir > 0 ? "ascending" : "descending") : "none"}">
+      <span>${c.label}</span>${on ? `<i class="arrow">${S.sort.dir > 0 ? "▲" : "▼"}</i>` : ""}</th>`;
+  }).join("");
   return `
-    <div class="page-head">
-      <div class="grow"><h1>Applications</h1><p class="sub">${S.apps.length} tracked. Click a status to filter; click a row to see the full record.</p></div>
-      <button class="btn primary" data-act="new-app">Add application</button>
+    <div class="page-head sheet-head">
+      <div class="grow"><h1>Applications Log</h1></div>
+      <form id="link-form" class="link-form" autocomplete="off">
+        <input type="url" id="link-input" name="url" placeholder="Paste a job link to fill a new row" aria-label="Job posting link" required>
+        <button class="btn primary" type="submit">Add from link</button>
+      </form>
     </div>
-    ${mixBar()}
-    <div class="stats">${metrics().map(([v, l]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("")}</div>
-    <div class="toolbar">
-      <input class="search" type="search" id="apps-q" placeholder="Search company, role, notes" value="${esc(S.appsQuery)}">
-      <div class="seg" role="group" aria-label="Layout">
-        <button data-apps-view="table" aria-pressed="${S.appsView === "table"}">Table</button>
-        <button data-apps-view="board" aria-pressed="${S.appsView === "board"}">Board</button>
+    <div class="sheet-tools">
+      <input class="search" type="search" id="apps-q" placeholder="Search the log" value="${esc(S.appsQuery)}">
+      <button class="btn sm" data-act="toggle-group" aria-pressed="${S.groupCollapsed}">${S.groupCollapsed ? "Show" : "Hide"} response columns</button>
+      ${S.sort.key ? `<button class="btn sm ghost" data-act="clear-sort">Back to log order</button>` : ""}
+      <div class="spacer"></div>
+      <label class="zoom">Zoom <select id="zoom">${["0.6", "0.75", "0.85", "0.9", "1"].map((z) => `<option value="${z}" ${S.zoom === z ? "selected" : ""}>${Math.round(z * 100)}%</option>`).join("")}</select></label>
+      <button class="btn sm" data-act="add-row">Add empty row</button>
+    </div>
+    <div class="sheet-layout">
+      <div class="sheet-scroll" id="sheet-scroll">
+        <table class="sheet ${S.groupCollapsed ? "collapsed" : ""}" id="sheet" style="--zoom:${Number(S.zoom) || 1}">
+          <thead><tr><th class="gutter corner" aria-label="Row"></th>${head}</tr></thead>
+          <tbody id="sheet-body">${list.map((a) => rowHtml(a, S.apps.indexOf(a) + 1)).join("")}</tbody>
+        </table>
+        ${list.length ? "" : `<div class="empty">${S.apps.length ? "No rows match the search." : "Paste a job link above to start the log."}</div>`}
       </div>
+      <aside class="metrics-wrap" id="metrics">${metricsPanel()}</aside>
     </div>
-    ${body}`;
+    <datalist id="contracts">${CONTRACT_SUGGESTIONS.map((c) => `<option value="${c}">`).join("")}</datalist>
+    <p class="faint small sheet-foot">Click any cell to edit it. Ticking Applied or Response Received stamps today's date; unticking clears it. The row number opens notes, contacts and history.</p>`;
 }
-function boardHtml(list) {
-  const cols = S.appsStatus ? [STATUS[S.appsStatus]] : STATUSES.filter((s) => s.open || list.some((a) => a.status === s.id && s.id === "accepted"));
-  return `<div class="board">${cols.map((s) => {
-    const items = list.filter((a) => a.status === s.id);
-    return `<div class="col" data-col="${s.id}">
-      <div class="col-head"><span class="pill" style="--c: var(--s-${s.id})">${s.label}</span><span class="faint small">${items.length}</span></div>
-      ${items.map((a) => `<div class="card" draggable="true" data-app="${a.id}">
-        <div class="co">${esc(a.company)}</div><div class="r">${esc(a.role)}</div>
-        <div class="meta"><span>${esc(a.contract ?? "")}</span><span>${followUpDue(a) ? `<span class="flag">Follow up</span>` : a.applied_on ? esc(fmtDate(a.applied_on)) : ""}</span></div>
-      </div>`).join("")}
-    </div>`;
-  }).join("")}</div>`;
+
+// Re-draw one row in place (keeps scroll and focus elsewhere), plus the metrics.
+function refreshRow(id) {
+  const a = S.apps.find((x) => x.id === id);
+  const tr = document.querySelector(`tr[data-row="${id}"]`);
+  if (tr && a) {
+    const n = tr.querySelector(".gutter button")?.textContent ?? "";
+    const focusedField = document.activeElement?.closest(`tr[data-row="${id}"]`) ? document.activeElement.dataset.field : null;
+    tr.outerHTML = rowHtml(a, n);
+    if (focusedField) document.querySelector(`tr[data-row="${id}"] [data-field="${focusedField}"]`)?.focus();
+  }
+  const m = $("#metrics");
+  if (m) m.innerHTML = metricsPanel();
 }
-async function setStatus(id, status) {
-  const { data, error } = await sb.from("applications").update({ status }).eq("id", id).select().single();
-  if (error) return fail(error, "Couldn't change the status");
+async function savePatch(id, patch, quiet = false) {
+  const { data, error } = await sb.from("applications").update(patch).eq("id", id).select().single();
+  if (error) { fail(error, "Couldn't save"); refreshRow(id); return null; }
   S.apps = S.apps.map((a) => (a.id === id ? data : a));
-  toast(`${data.company}: ${STATUS[status].label}`);
+  if (!quiet) refreshRow(id);
+  return data;
+}
+async function commitCell(td) {
+  const id = Number(td.closest("tr").dataset.row);
+  const field = td.dataset.field;
+  const a = S.apps.find((x) => x.id === id);
+  let value = td.textContent.replace(/ /g, " ").trim();
+  if (field !== "description") value = value.replace(/\s+/g, " ");
+  if ((a[field] ?? "") === value) return;
+  if (field === "company" && !value) { td.textContent = a.company; return toast("A row needs a company name."); }
+  const data = await savePatch(id, { [field]: value || null }, true);
+  if (data) {
+    const tr = td.closest("tr");
+    tr.className = `tone-${rowTone(data)}`;
+  }
+}
+function editDate(td) {
+  if (td.querySelector("input")) return;
+  const id = Number(td.closest("tr").dataset.row);
+  const a = S.apps.find((x) => x.id === id);
+  td.innerHTML = `<input type="date" value="${esc(a[td.dataset.field] ?? "")}">`;
+  const input = td.querySelector("input");
+  input.focus();
+  try { input.showPicker?.(); } catch { /* not allowed without a click on some browsers */ }
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const v = input.value || null;
+    if (save && v !== (a[td.dataset.field] ?? null)) await savePatch(id, { [td.dataset.field]: v });
+    else refreshRow(id);
+  };
+  input.addEventListener("change", () => finish(true));
+  input.addEventListener("blur", () => finish(true));
+  input.addEventListener("keydown", (e) => { if (e.key === "Escape") finish(false); if (e.key === "Enter") input.blur(); });
+}
+function editLink(td) {
+  if (td.querySelector("input")) return;
+  const id = Number(td.closest("tr").dataset.row);
+  const a = S.apps.find((x) => x.id === id);
+  td.innerHTML = `<input type="url" value="${esc(a.url ?? "")}" placeholder="https://…">`;
+  const input = td.querySelector("input");
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const v = input.value.trim() || null;
+    if (save && v !== (a.url ?? null)) await savePatch(id, { url: v });
+    else refreshRow(id);
+  };
+  input.addEventListener("blur", () => finish(true));
+  input.addEventListener("keydown", (e) => { if (e.key === "Escape") finish(false); if (e.key === "Enter") input.blur(); });
+}
+
+// Paste a link → read the posting → new row at the bottom, like typing in the next empty Excel row.
+async function addFromLink(raw) {
+  let url;
+  try { url = new URL(raw.trim()).toString(); } catch { return toast("That doesn't look like a link."); }
+  const dup = S.apps.find((a) => a.url && a.url.split("?")[0] === url.split("?")[0]);
+  if (dup) { focusRow(dup.id); return toast(`Already in the log: ${dup.company}${dup.role ? ` – ${dup.role}` : ""}`); }
+  const input = $("#link-input");
+  const button = $("#link-form button");
+  if (input) { input.value = ""; input.disabled = true; }
+  if (button) { button.disabled = true; button.textContent = "Reading the posting…"; }
+  const pending = document.createElement("tr");
+  pending.className = "pending-row";
+  pending.innerHTML = `<th class="gutter"></th><td colspan="${COLS.length}"><span class="spinner"></span>Reading ${esc(new URL(url).hostname)}…</td>`;
+  $("#sheet-body")?.appendChild(pending);
+  pending.scrollIntoView({ block: "nearest" });
+  let row = { url }, note = "";
+  try {
+    const { data, error } = await sb.functions.invoke("extract", { body: { url } });
+    if (error) throw error;
+    if (data?.ok) row = { ...data.row, url };
+    else note = data?.error ?? "Couldn't read that page.";
+  } catch (err) {
+    note = `Couldn't read that page (${err.message ?? err}).`;
+  }
+  const insert = {
+    company: row.company || "", role: row.role ?? null, contract: row.contract ?? null, location: row.location ?? null,
+    description: row.description ?? null, date_posted: row.date_posted ?? null, url,
+    company_id: S.companies.find((c) => c.name.toLowerCase() === (row.company ?? "").toLowerCase())?.id ?? null,
+  };
+  const { data, error } = await sb.from("applications").insert(insert).select().single();
+  pending.remove();
+  if (input) input.disabled = false;
+  if (button) { button.disabled = false; button.textContent = "Add from link"; }
+  if (error) return fail(error, "Couldn't add the row");
+  S.apps.push(data);
+  S.sort = { key: null, dir: 1 };
   render();
+  focusRow(data.id, note ? "company" : null);
+  toast(note ? `${note} The link is saved; fill in the rest.` : `Added ${data.company}${data.role ? ` – ${data.role}` : ""}. Tick Applied once you've sent it.`);
+}
+async function addEmptyRow() {
+  const { data, error } = await sb.from("applications").insert({ company: "" }).select().single();
+  if (error) return fail(error, "Couldn't add a row");
+  S.apps.push(data);
+  S.sort = { key: null, dir: 1 };
+  render();
+  focusRow(data.id, "company");
+}
+function focusRow(id, field) {
+  const tr = document.querySelector(`tr[data-row="${id}"]`);
+  if (!tr) return;
+  tr.scrollIntoView({ block: "center" });
+  tr.classList.add("flash");
+  setTimeout(() => tr.classList.remove("flash"), 1600);
+  if (field) tr.querySelector(`[data-field="${field}"]`)?.focus();
 }
 
 // ───────────────────────────── companies ─────────────────────────────
@@ -580,9 +724,13 @@ async function saveSettings(form) {
   render();
 }
 function exportCsv() {
-  const cols = ["company", "role", "contract", "location", "status", "date_posted", "applied_on", "response_on", "follow_up_on", "next_step", "contact", "documents", "url", "notes"];
-  const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const csv = [cols.join(","), ...S.apps.map((a) => cols.map((c) => cell(a[c])).join(","))].join("\n");
+  const cols = [["company", "Company"], ["role", "Position"], ["contract", "Position Length"], ["location", "Location"],
+    ["description", "Description"], ["date_posted", "Date Posted"], ["url", "Link"], ["applied", "Applied"],
+    ["applied_on", "Application Date"], ["responded", "Response Received"], ["response_on", "Response Date"],
+    ["wait", "Response Time (days)"], ["positive", "Positive Response"], ["contact", "Contacts"], ["next_step", "Next step"], ["notes", "Notes"]];
+  const cell = (v) => `"${String(typeof v === "boolean" ? (v ? "TRUE" : "FALSE") : v ?? "").replace(/"/g, '""')}"`;
+  const val = (a, k) => (k === "wait" ? responseDays(a) : a[k]);
+  const csv = [cols.map(([, l]) => l).join(","), ...S.apps.map((a) => cols.map(([k]) => cell(val(a, k))).join(","))].join("\n");
   const url = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
   const link = Object.assign(document.createElement("a"), { href: url, download: `applications-${today()}.csv` });
   link.click();
@@ -594,29 +742,29 @@ let drawerEvents = [];
 function drawerHtml() {
   const d = S.drawer;
   if (d.type === "company") return companyDrawer(S.companies.find((c) => c.id === d.id));
-  const a = d.id ? S.apps.find((x) => x.id === d.id) : { status: "saved", priority: 2 };
+  const a = S.apps.find((x) => x.id === d.id);
   const f = (name, label, type = "text", cls = "") =>
     `<label class="field ${cls}"><span>${label}</span><input type="${type}" name="${name}" value="${esc(a[name] ?? "")}"></label>`;
+  const chk = (name, label) => `<label class="check"><input type="checkbox" name="${name}" ${a[name] ? "checked" : ""}><span>${label}</span></label>`;
   return `<div class="scrim" data-act="close"></div>
   <aside class="drawer" role="dialog" aria-modal="true" aria-label="Application">
-    <div class="drawer-head"><h2>${d.id ? esc(a.company) : "New application"}</h2>
+    <div class="drawer-head"><h2>${esc(a.company || "New row")}</h2>
       ${a.url ? `<a class="btn sm" href="${safeUrl(a.url)}" target="_blank" rel="noopener">Open posting</a>` : ""}
       <button class="btn sm ghost" data-act="close" aria-label="Close">Close</button></div>
     <form class="drawer-body" id="app-form">
       <div class="fields">
         ${f("company", "Company")}
-        ${f("role", "Role")}
-        <label class="field"><span>Status</span>${statusSelect(a.status, 'name="status"')}</label>
-        <label class="field"><span>Type</span><select name="contract"><option value=""></option>${CONTRACTS.map((c) => `<option ${a.contract === c ? "selected" : ""}>${c}</option>`).join("")}</select></label>
+        <label class="field"><span>Position Length</span><input type="text" name="contract" list="contracts" value="${esc(a.contract ?? "")}"></label>
+        ${f("role", "Position", "text", "wide")}
         ${f("location", "Location")}
-        <label class="field"><span>Priority</span><select name="priority">${[[1, "High"], [2, "Normal"], [3, "Low"]].map(([v, l]) => `<option value="${v}" ${a.priority === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
-        ${f("url", "Posting link", "url", "wide")}
-        ${f("date_posted", "Posted", "date")}
-        ${f("applied_on", "Applied", "date")}
-        ${f("response_on", "Reply received", "date")}
-        ${f("follow_up_on", "Follow up on", "date")}
-        ${f("next_step", "Next step", "text", "wide")}
+        ${f("date_posted", "Date Posted", "date")}
+        <label class="field wide"><span>Description</span><textarea name="description" rows="3">${esc(a.description ?? "")}</textarea></label>
+        ${f("url", "Link", "url", "wide")}
+        <div class="checks wide">${chk("applied", "Applied")}${chk("responded", "Response Received")}${chk("positive", "Positive Response")}</div>
+        ${f("applied_on", "Application Date", "date")}
+        ${f("response_on", "Response Date", "date")}
         ${f("contact", "Contacts", "text", "wide")}
+        ${f("next_step", "Next step", "text", "wide")}
         ${f("documents", "CV and cover letter sent", "text", "wide")}
         <label class="field wide"><span>Notes</span><textarea name="notes" rows="4">${esc(a.notes ?? "")}</textarea></label>
       </div>
@@ -626,17 +774,17 @@ function drawerHtml() {
       </section>` : ""}
     </form>
     <div class="drawer-foot">
-      ${d.id ? `<button class="btn ghost danger" data-act="delete-app">Delete</button>` : ""}
+      <button class="btn ghost danger" data-act="delete-app">Delete row</button>
       <div class="spacer"></div>
       <button class="btn ghost" data-act="close">Cancel</button>
-      <button class="btn primary" data-act="save-app">${d.id ? "Save changes" : "Add application"}</button>
+      <button class="btn primary" data-act="save-app">Save changes</button>
     </div>
   </aside>`;
 }
 function timelineHtml() {
   if (!drawerEvents.length) return `<li><time></time><span class="faint">Loading…</span></li>`;
   return drawerEvents.map((e) => {
-    const what = e.kind === "created" ? `Added as ${STATUS[e.to_status]?.label ?? e.to_status}`
+    const what = e.kind === "created" ? "Added to the log"
       : e.kind === "status" ? `${STATUS[e.from_status]?.label ?? e.from_status} → ${STATUS[e.to_status]?.label ?? e.to_status}`
       : esc(e.note);
     return `<li><time>${esc(fmtDate(e.at))}</time><span>${e.kind === "note" ? what : `<span class="pill" style="--c: var(--s-${e.to_status})">${what}</span>`}</span></li>`;
@@ -656,19 +804,18 @@ async function saveApp() {
   const form = $("#app-form");
   const fd = new FormData(form);
   const row = {};
-  for (const k of ["company", "role", "status", "contract", "location", "url", "date_posted", "applied_on", "response_on", "follow_up_on", "next_step", "contact", "documents", "notes"]) {
+  for (const k of ["company", "role", "contract", "location", "description", "url", "date_posted", "applied_on", "response_on", "next_step", "contact", "documents", "notes"]) {
     const v = (fd.get(k) ?? "").toString().trim();
     row[k] = v === "" ? null : v;
   }
-  row.priority = Number(fd.get("priority") || 2);
+  for (const k of ["applied", "responded", "positive"]) row[k] = fd.get(k) === "on";
   if (!row.company) return toast("Add the company name first.");
   const id = S.drawer.id;
-  const q = id ? sb.from("applications").update(row).eq("id", id) : sb.from("applications").insert(row);
-  const { data, error } = await q.select().single();
+  const { data, error } = await sb.from("applications").update(row).eq("id", id).select().single();
   if (error) return fail(error, "Couldn't save");
-  S.apps = id ? S.apps.map((a) => (a.id === id ? data : a)) : [data, ...S.apps];
+  S.apps = S.apps.map((a) => (a.id === id ? data : a));
   S.drawer = null;
-  toast(id ? "Saved" : `Added ${data.company}`);
+  toast("Saved");
   render();
 }
 async function addNote() {
@@ -683,7 +830,7 @@ async function addNote() {
 }
 async function deleteApp() {
   const a = S.apps.find((x) => x.id === S.drawer.id);
-  if (!confirm(`Delete the ${a.company} application and its history? This can't be undone.`)) return;
+  if (!confirm(`Delete the ${a.company || "empty"} row and its history? This can't be undone.`)) return;
   const { error } = await sb.from("applications").delete().eq("id", a.id);
   if (error) return fail(error, "Couldn't delete");
   S.apps = S.apps.filter((x) => x.id !== a.id);
@@ -751,7 +898,25 @@ function bindView() {
   }
   $("#inbox-co")?.addEventListener("change", async (e) => { S.inboxCompany = e.target.value; await loadInbox(); render(); });
   const qApps = $("#apps-q");
-  if (qApps) qApps.addEventListener("input", () => { S.appsQuery = qApps.value; const pos = qApps.selectionStart; render(); const el = $("#apps-q"); el.focus(); el.setSelectionRange(pos, pos); });
+  if (qApps) qApps.addEventListener("input", () => {
+    S.appsQuery = qApps.value;
+    const list = sheetRows();
+    $("#sheet-body").innerHTML = list.map((a) => rowHtml(a, S.apps.indexOf(a) + 1)).join("");
+  });
+  $("#zoom")?.addEventListener("change", (e) => {
+    S.zoom = e.target.value;
+    localSet("zoom", S.zoom);
+    $("#sheet").style.setProperty("--zoom", S.zoom);
+  });
+  const linkForm = $("#link-form");
+  if (linkForm) {
+    linkForm.addEventListener("submit", (e) => { e.preventDefault(); addFromLink($("#link-input").value); });
+    // Pasting a link is enough: no need to press the button.
+    $("#link-input").addEventListener("paste", (e) => {
+      const text = (e.clipboardData?.getData("text") ?? "").trim();
+      if (/^https?:\/\/\S+$/i.test(text)) { e.preventDefault(); addFromLink(text); }
+    });
+  }
   $("#add-company")?.addEventListener("submit", (e) => {
     e.preventDefault();
     const f = e.target;
@@ -777,47 +942,67 @@ function bindView() {
     });
   });
 
-  // board drag and drop
-  document.querySelectorAll(".card[draggable]").forEach((card) => {
-    card.addEventListener("dragstart", (e) => e.dataTransfer.setData("text/plain", card.dataset.app));
-  });
-  document.querySelectorAll(".col").forEach((col) => {
-    col.addEventListener("dragover", (e) => { e.preventDefault(); col.classList.add("drop"); });
-    col.addEventListener("dragleave", () => col.classList.remove("drop"));
-    col.addEventListener("drop", (e) => {
-      e.preventDefault();
-      col.classList.remove("drop");
-      const id = Number(e.dataTransfer.getData("text/plain"));
-      if (id && S.apps.find((a) => a.id === id)?.status !== col.dataset.col) setStatus(id, col.dataset.col);
-    });
-  });
   void main;
 }
 
 document.addEventListener("change", (e) => {
-  const sel = e.target.closest("[data-status-of]");
-  if (sel) { e.stopPropagation(); setStatus(Number(sel.dataset.statusOf), sel.value); }
-  if (e.target.matches('.drawer select[name="status"]')) e.target.style.setProperty("--c", `var(--s-${e.target.value})`);
+  const box = e.target.closest("input[data-check]");
+  if (box) {
+    const id = Number(box.closest("tr").dataset.row);
+    const patch = { [box.dataset.check]: box.checked };
+    // Same logic as the Excel: a positive response is a response; no response means it can't be positive.
+    if (box.dataset.check === "positive" && box.checked) patch.responded = true;
+    if (box.dataset.check === "responded" && !box.checked) patch.positive = false;
+    savePatch(id, patch);
+  }
+});
+
+// Sheet editing: text cells commit on blur or Enter; Escape puts the old value back.
+document.addEventListener("focusin", (e) => {
+  const td = e.target.closest?.("td[contenteditable]");
+  if (td) td.dataset.before = td.textContent;
+});
+document.addEventListener("focusout", (e) => {
+  const td = e.target.closest?.("td[contenteditable]");
+  if (td && td.textContent !== td.dataset.before) commitCell(td);
+});
+document.addEventListener("keydown", (e) => {
+  const td = e.target.closest?.("td[contenteditable]");
+  if (!td) return;
+  if (e.key === "Enter" && !(e.shiftKey && td.classList.contains("c-long"))) { e.preventDefault(); td.blur(); }
+  if (e.key === "Escape") { td.textContent = td.dataset.before ?? ""; td.blur(); }
+}, true);
+document.addEventListener("paste", (e) => {
+  // Keep pasted text plain in browsers without plaintext-only editing.
+  const td = e.target.closest?.("td[contenteditable]");
+  if (!td) return;
+  e.preventDefault();
+  document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
 });
 
 document.addEventListener("click", async (e) => {
-  const el = e.target.closest("[data-act], [data-inbox-tab], [data-apps-view], [data-status], [data-sort], [data-chip-remove], tr[data-app], .card[data-app], .post[data-i]");
+  const dateCell = e.target.closest("td.c-date");
+  if (dateCell && !e.target.closest("input")) return editDate(dateCell);
+  const linkCell = e.target.closest("td.c-link");
+  if (linkCell && !e.target.closest("a, input")) return editLink(linkCell);
+  const el = e.target.closest("[data-act], [data-inbox-tab], [data-open], [data-sort], [data-chip-remove], .post[data-i]");
   if (!el) return;
-  if (el.matches("[data-status-of], select")) return;
   if (el.dataset.chipRemove) {
     const k = el.dataset.chipRemove;
     S.settings[k] = S.settings[k].filter((_, i) => i !== Number(el.dataset.i));
     return render();
   }
   if (el.dataset.inboxTab) { S.inboxTab = el.dataset.inboxTab; S.cursor = 0; await loadInbox(); return render(); }
-  if (el.dataset.appsView) { S.appsView = el.dataset.appsView; localSet("appsView", S.appsView); return render(); }
-  if (el.dataset.status !== undefined && !el.dataset.act) { S.appsStatus = el.dataset.status && S.appsStatus !== el.dataset.status ? el.dataset.status : null; return render(); }
+  if (el.dataset.open) return openApp(Number(el.dataset.open));
   if (el.dataset.sort) {
+    // Click a header: A→Z, then Z→A, then back to the log's own order.
     const k = el.dataset.sort;
-    S.sort = { key: k, dir: S.sort.key === k ? -S.sort.dir : k === "company" || k === "role" ? 1 : -1 };
-    return render();
+    S.sort = S.sort.key !== k ? { key: k, dir: 1 } : S.sort.dir > 0 ? { key: k, dir: -1 } : { key: null, dir: 1 };
+    const scroll = $("#sheet-scroll")?.scrollLeft ?? 0;
+    render();
+    $("#sheet-scroll").scrollLeft = scroll;
+    return;
   }
-  if (el.matches("tr[data-app], .card[data-app]") && !e.target.closest("a, button, select")) return openApp(Number(el.dataset.app));
   if (el.matches(".post[data-i]") && !el.dataset.act) {
     if (e.target.closest("a, button")) return;
     S.cursor = Number(el.dataset.i);
@@ -849,7 +1034,12 @@ document.addEventListener("click", async (e) => {
     case "save-company": return saveCompany();
     case "delete-company": return deleteCompany();
     case "save-detected": return saveDetected();
-    case "new-app": return openApp(null);
+    case "add-row": return addEmptyRow();
+    case "clear-sort": S.sort = { key: null, dir: 1 }; return render();
+    case "toggle-group":
+      S.groupCollapsed = !S.groupCollapsed;
+      localSet("groupCollapsed", S.groupCollapsed ? "1" : "0");
+      return render();
     case "save-app": return saveApp();
     case "delete-app": return deleteApp();
     case "add-note": return addNote();
@@ -876,8 +1066,8 @@ document.addEventListener("keydown", (e) => {
 });
 
 async function route() {
-  const v = location.hash.replace("#", "") || "inbox";
-  S.view = ["inbox", "applications", "companies", "settings"].includes(v) ? v : "inbox";
+  const v = location.hash.replace("#", "") || "applications";
+  S.view = ["inbox", "applications", "companies", "settings"].includes(v) ? v : "applications";
   S.drawer = null;
   if (!S.user) return render();
   try {

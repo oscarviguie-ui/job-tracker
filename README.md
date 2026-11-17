@@ -3,7 +3,7 @@
 A personal job-search tracker that runs from anywhere:
 
 - **Inbox** — every morning a scraper reads the careers pages of the companies you follow and shows new postings that match your keywords and locations. Track one to turn it into an application, or dismiss it.
-- **Applications** — the Excel log, with more: inline status changes, a board view, follow-up dates, history of every status change, notes, contacts and documents.
+- **Applications** — the Excel "Applications Log", kept as it was: the same 13 columns, the Applied / Response Received / Positive Response tick boxes (ticking stamps the date), the same row colours and the Performance Metrics block. Paste a job link and the row fills itself: company, position, contract type, location, a short description and date posted. The row number opens notes, contacts and history.
 - **Companies** — add a company by pasting its careers-page URL; the app works out which system it runs on and previews what it finds. Pause, edit or run any company by hand.
 - **Settings** — keywords to include and exclude, locations, follow-up delay, CSV export.
 
@@ -23,6 +23,7 @@ GitHub Pages (docs/)  ──supabase-js──▶  Supabase Postgres (RLS: owner 
 
 - `supabase/migrations/` — schema, row-level security, matching, ingestion and the daily cron job.
 - `supabase/functions/scrape/` — the scraper. `adapters.ts` holds one small reader per applicant-tracking system.
+- `supabase/functions/extract/` — turns one job link into a log row. It reads the job board's own API when it knows it (Workday, SmartRecruiters, Greenhouse, Lever, Ashby, Recruitee, Oracle, LinkedIn's public job view), otherwise the schema.org `JobPosting` data most careers pages publish for Google Jobs, otherwise the page title. Sites that only show ads to signed-in users (JobTeaser, for example) can't be read; the link is kept and you fill the row by hand.
 
 ### Supported careers sites
 
@@ -49,7 +50,7 @@ A posting reaches the inbox when its title contains a **field** keyword (energy,
 
 1. Create a Supabase project and run the migrations in order (SQL editor or `supabase db push`).
 2. In the Vault, add two secrets: `scrape_url` = `https://<project>.supabase.co/functions/v1/scrape`, `cron_secret` = any long random string.
-3. Deploy the function: `supabase functions deploy scrape --no-verify-jwt` (it checks the cron secret or the owner's login itself).
+3. Deploy the functions: `supabase functions deploy scrape --no-verify-jwt` and `supabase functions deploy extract --no-verify-jwt` (both check the cron secret or the owner's login themselves).
 4. Put your project URL and publishable key in `docs/config.js` (the publishable key is meant to be public; RLS protects the data).
 5. Enable GitHub Pages from `main` / `docs`.
 6. Open the site and create your account. **The first account created becomes the owner**; any later sign-up is refused access to the data.
