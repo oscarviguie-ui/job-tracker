@@ -46,6 +46,7 @@ const S = {
   drawer: null,          // { type: 'app'|'company', id|null }
   detect: null,          // detection preview in Companies
   newCount: 0,
+  brands: {},                    // company key → { domain, icon_url } from the brand function
 };
 
 function localGet(k, d) { try { return localStorage.getItem("jt:" + k) ?? d; } catch { return d; } }
@@ -89,13 +90,15 @@ function fail(error, what) {
 
 // ───────────────────────────── data ─────────────────────────────
 async function loadCore() {
-  const [c, a, s, n] = await Promise.all([
+  const [c, a, s, n, b] = await Promise.all([
     sb.from("companies").select("*").order("name"),
     sb.from("applications").select("*").order("id", { ascending: true }),
     sb.from("settings").select("*").eq("id", 1).single(),
     sb.from("postings").select("id", { count: "exact", head: true }).eq("state", "new").eq("matched", true).eq("is_open", true),
+    sb.from("brands").select("*"),
   ]);
   for (const r of [c, a, s, n]) if (r.error) throw r.error;
+  S.brands = Object.fromEntries((b.data ?? []).map((x) => [x.key, x]));
   S.companies = c.data;
   S.apps = a.data;
   S.settings = s.data;
@@ -151,6 +154,7 @@ async function render() {
   const views = { inbox: inboxView, applications: appsView, companies: companiesView, settings: settingsView };
   app.innerHTML = shell((views[S.view] ?? appsView)());
   bindView();
+  setTimeout(ensureBrands, 300);
 }
 
 // ───────────────────────────── auth ─────────────────────────────
@@ -249,7 +253,7 @@ function postingRow(p, i) {
     <div>
       <a class="post-title" href="${safeUrl(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>
       <div class="post-meta">
-        <span class="company">${esc(p.companies?.name)}</span>
+        <span class="company">${logoHtml(p.companies?.name, "sm")}${esc(p.companies?.name)}</span>
         ${p.location ? `<span>${esc(p.location)}</span>` : ""}
         ${p.posted_at ? `<span>Posted ${esc(fmtDate(p.posted_at))}</span>` : ""}
         ${!p.baseline && S.inboxTab === "new" ? `<span class="tag new">New listing</span>` : ""}
@@ -313,11 +317,74 @@ async function removeFromInbox(id, state) {
   render();
 }
 
+// ───────────────────────────── company logos ─────────────────────────────
+// A logo next to every company name, so rows can be told apart at a glance. Logos come from each company's
+// website (found by the brand function, stored in the brands table). Until one is found, or if a company has
+// none, the tile shows the company's initials on a colour derived from its name, so it still reads as a mark.
+function brandFor(name) {
+  const k = companyKey(name ?? "");
+  if (!k) return null;
+  return S.brands[k] ?? Object.values(S.brands).find((b) => b.icon_url && sameCompany(b.name, name)) ?? null;
+}
+function initials(name) {
+  name = name ?? "";
+  const words = name.replace(/[^\p{L}\p{N} &'-]/gu, " ").split(/[\s&'-]+/).filter((w) => w && !/^(de|du|des|la|le|les|et|and|of|the|sa|se|sas|group|groupe)$/i.test(w));
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  const w = words[0] ?? "?";
+  const caps = w.match(/\p{Lu}/gu);
+  return caps && caps.length >= 2 && w !== w.toUpperCase() ? caps.slice(0, 2).join("") : w.slice(0, 2).replace(/^./, (c) => c.toUpperCase());
+}
+const hueOf = (name = "") => [...companyKey(name)].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) % 360, 7);
+function logoHtml(name, cls = "") {
+  const b = brandFor(name);
+  const ini = esc(initials(name));
+  return `<span class="logo ${cls}" data-logo="${esc(companyKey(name ?? ""))}" data-name="${esc(name ?? "")}" data-ini="${ini}" style="--hue:${hueOf(name)}" aria-hidden="true">${
+    b?.icon_url ? `<img src="${esc(b.icon_url)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<b>${ini}</b>`}</span>`;
+}
+// A logo that fails to load falls back to the initials.
+document.addEventListener("error", (e) => {
+  const img = e.target;
+  if (img?.matches?.(".logo img")) img.parentElement.innerHTML = `<b>${img.parentElement.dataset.ini}</b>`;
+}, true);
+function updateLogos() {
+  document.querySelectorAll(".logo[data-logo]").forEach((el) => {
+    const b = brandFor(el.dataset.name);
+    if (b?.icon_url && !el.querySelector("img")) el.innerHTML = `<img src="${esc(b.icon_url)}" alt="" loading="lazy" referrerpolicy="no-referrer">`;
+  });
+}
+// Look up companies that don't have a logo yet, a batch at a time, in the background.
+const brandTried = new Set();
+let brandBusy = false;
+async function ensureBrands() {
+  if (brandBusy || !S.user) return;
+  const byKey = new Map();
+  const add = (name, link) => {
+    const k = companyKey(name ?? "");
+    if (!k || S.brands[k] || brandTried.has(k)) return;
+    const e = byKey.get(k) ?? { name, links: [] };
+    if (link) e.links.push(link);
+    byKey.set(k, e);
+  };
+  [...S.apps].reverse().forEach((a) => add(a.company, a.url));
+  S.companies.forEach((c) => add(c.name, c.careers_url));
+  const todo = [...byKey.entries()].slice(0, 25);
+  if (!todo.length) return;
+  todo.forEach(([k]) => brandTried.add(k));
+  brandBusy = true;
+  try {
+    const { data } = await sb.functions.invoke("brand", { body: { companies: todo.map(([, v]) => ({ name: v.name, links: v.links.slice(0, 5) })) } });
+    for (const b of data?.brands ?? []) S.brands[b.key] = b;
+    updateLogos();
+  } catch { /* logos are a nicety; initials stay */ }
+  brandBusy = false;
+  if (byKey.size > todo.length) ensureBrands();
+}
+
 // ───────────────────────────── applications log ─────────────────────────────
 // The Excel's columns, with one Status per row in place of the three tick boxes.
 // Computer: a full-width table. Phone: a card per row.
 const COLS = [
-  { key: "company", label: "Company", kind: "text", w: 140 },
+  { key: "company", label: "Company", kind: "text", w: 168 },
   { key: "role", label: "Position", kind: "text", w: 0 },        // 0 = shares the remaining width
   { key: "contract", label: "Type", kind: "text", w: 88, title: "Position Length" },
   { key: "location", label: "Location", kind: "text", w: 104 },
@@ -381,6 +448,7 @@ function cellHtml(a, c) {
   const v = a[c.key];
   switch (c.kind) {
     case "text":
+      if (c.key === "company") return `<td class="c-company"><div class="co-cell">${logoHtml(v)}<div class="ed" data-field="company" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</div></div></td>`;
       return `<td class="c-${c.key}"><div class="ed" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</div></td>`;
     case "long":
       return `<td class="c-desc"><div class="ed clamp" data-field="${c.key}" contenteditable="plaintext-only" spellcheck="false">${esc(v)}</div></td>`;
@@ -410,10 +478,13 @@ function cardHtml(a, n) {
     : a.date_posted ? `posted ${esc(shortDate(a.date_posted))}` : "";
   return `<article class="card tone-${rowTone(a)}" data-row="${a.id}">
     <button type="button" class="card-main" data-open="${a.id}">
-      <span class="card-top"><b class="co">${esc(a.company) || '<span class="faint">No company</span>'}</b><span class="n">#${n}</span></span>
-      ${a.role ? `<span class="card-role">${esc(a.role)}</span>` : ""}
-      ${meta ? `<span class="card-meta">${meta}</span>` : ""}
-      ${a.description ? `<span class="card-desc">${esc(a.description)}</span>` : ""}
+      ${logoHtml(a.company, "lg")}
+      <span class="card-text">
+        <span class="card-top"><b class="co">${esc(a.company) || '<span class="faint">No company</span>'}</b><span class="n">#${n}</span></span>
+        ${a.role ? `<span class="card-role">${esc(a.role)}</span>` : ""}
+        ${meta ? `<span class="card-meta">${meta}</span>` : ""}
+        ${a.description ? `<span class="card-desc">${esc(a.description)}</span>` : ""}
+      </span>
     </button>
     <div class="card-foot">
       ${statusSelect(a)}
@@ -770,7 +841,7 @@ function companiesView() {
     <div class="table-wrap"><table class="stack">
       <thead><tr><th>Company</th><th class="hide-m">Source</th><th>Status</th><th class="num hide-m">Matches</th><th class="hide-m">Last checked</th><th></th></tr></thead>
       <tbody>${S.companies.map((c) => `<tr>
-        <td class="co">${c.careers_url ? `<a href="${safeUrl(c.careers_url)}" target="_blank" rel="noopener">${esc(c.name)}</a>` : esc(c.name)}</td>
+        <td class="co"><span class="co-cell">${logoHtml(c.name, "sm")}${c.careers_url ? `<a href="${safeUrl(c.careers_url)}" target="_blank" rel="noopener">${esc(c.name)}</a>` : esc(c.name)}</span></td>
         <td class="hide-m"><span class="src">${esc(ATS_LABEL[c.ats] ?? c.ats)}</span>${c.country ? `<span class="faint small"> in ${esc(c.country)}</span>` : ""}${c.search ? `<span class="faint small"> for “${esc(c.search)}”</span>` : ""}</td>
         <td class="status-cell">${companyHealth(c)}</td>
         <td class="num hide-m">${c.matched_open ?? ""}</td>
@@ -923,7 +994,8 @@ function drawerHtml() {
       <button class="btn sm ghost" data-act="close" aria-label="Close">Close</button></div>
     <form class="drawer-body" id="app-form">
       <div class="fields">
-        ${f("company", "Company", "text", "wide")}
+        ${f("company", "Company")}
+        <label class="field"><span>Company website <span class="faint">(for the logo)</span></span><input type="text" name="brand_domain" placeholder="e.g. engie.com" value="${esc(brandFor(a.company)?.domain ?? "")}"></label>
         ${f("role", "Position", "text", "wide")}
         <label class="field wide"><span>Status</span><select name="status">${STATUSES.filter((x) => !x.legacy || x.id === a.status).map((x) => `<option value="${x.id}" ${x.id === a.status ? "selected" : ""}>${x.label}</option>`).join("")}</select></label>
         ${f("applied_on", "Application Date", "date")}
@@ -980,6 +1052,14 @@ async function saveApp() {
   }
   if (!row.company) return toast("Add the company name first.");
   const id = S.drawer.id;
+  const site = (fd.get("brand_domain") ?? "").toString().trim().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "").toLowerCase();
+  if (site && site !== (brandFor(row.company)?.domain ?? "")) {
+    sb.functions.invoke("brand", { body: { force: { name: row.company, domain: site } } }).then(({ data }) => {
+      for (const b of data?.brands ?? []) S.brands[b.key] = b;
+      document.querySelectorAll(`.logo[data-logo="${companyKey(row.company)}"]`).forEach((el) => { el.innerHTML = `<b>${el.dataset.ini}</b>`; });
+      updateLogos();
+    });
+  }
   const { data, error } = await sb.from("applications").update(row).eq("id", id).select().single();
   if (error) return fail(error, "Couldn't save");
   S.apps = S.apps.map((a) => (a.id === id ? data : a));

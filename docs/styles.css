@@ -339,7 +339,7 @@ main.wide { max-width: 1520px; }
 .ratios { display: flex; gap: 18px; margin: 0 0 0 auto; align-items: baseline; }
 .ratios > div { display: flex; flex-direction: row-reverse; align-items: baseline; gap: 5px; }
 .ratios dt { font-size: 13px; color: var(--muted); }
-.ratios dd { margin: 0; font-size: 17px; font-weight: 750; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.ratios dd { margin: 0; white-space: nowrap; font-size: 17px; font-weight: 750; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 .archive-note { margin: 0 0 12px; padding: 10px 14px; border-radius: var(--radius-m); background: var(--sunk); color: var(--muted); font-size: 14px; }
 
 .add-bar {
@@ -477,7 +477,8 @@ div.pending-row { padding: 14px 16px; border: 1px dashed var(--line); border-rad
   main.wide { padding: 12px 12px 110px; }
   .log-head { gap: 10px; margin-bottom: 10px; }
   .log-head h1 { font-size: 22px; flex: 1; }
-  .ratios { gap: 14px; }
+  .ratios { gap: 6px 14px; flex-wrap: wrap; }
+  .ratios dt { white-space: nowrap; }
   .ratios dt { font-size: 12px; }
   .ratios dd { font-size: 15px; }
   .hide-xs { display: none; }
@@ -499,3 +500,20 @@ div.pending-row { padding: 14px 16px; border: 1px dashed var(--line); border-rad
   input, select, textarea { font-size: 16px; } /* stops iOS zooming in on focus */
   .drawer-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
 }
+
+/* ── company logos ──
+   A small white tile with the company's own icon; without one, its initials on a colour taken from its name. */
+.logo {
+  --s: 24px; width: var(--s); height: var(--s); flex: none; display: inline-grid; place-items: center; overflow: hidden;
+  border-radius: 6px; background: #fff; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08); vertical-align: middle;
+}
+.logo img { width: 100%; height: 100%; object-fit: contain; padding: 2px; }
+.logo b { width: 100%; height: 100%; display: grid; place-items: center; background: hsl(var(--hue) 42% 42%); color: #fff; font-size: calc(var(--s) * .42); font-weight: 750; letter-spacing: -.02em; }
+.logo.sm { --s: 18px; border-radius: 5px; margin-right: 6px; }
+.logo.lg { --s: 36px; border-radius: 9px; }
+.co-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.co-cell .ed { flex: 1; min-width: 0; }
+.post-meta .company { display: inline-flex; align-items: center; }
+.card-main { grid-template-columns: auto minmax(0, 1fr); column-gap: 11px; align-items: start; }
+.card-main > .logo { margin-top: 1px; }
+.card-text { display: grid; gap: 1px; min-width: 0; }

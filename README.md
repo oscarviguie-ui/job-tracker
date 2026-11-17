@@ -9,7 +9,7 @@ A personal job-search tracker that runs from anywhere:
 
 The web app is a static site in [`docs/`](docs/) (served by GitHub Pages). Data, auth and the scraper live in Supabase.
 
-On a phone the log becomes a list of cards with the three tick boxes on each card, and a **Paste** button fills the link box from the clipboard. Add the site to your home screen to use it like an app; on Android it then shows up in the share sheet, so sharing a LinkedIn job to it drops the link straight into the add box.
+On a phone the log becomes a list of cards with the status menu on each card, and a **Paste** button fills the link box from the clipboard. Add the site to your home screen to use it like an app; on Android it then shows up in the share sheet, so sharing a LinkedIn job to it drops the link straight into the add box.
 
 ## How it fits together
 
@@ -25,6 +25,7 @@ GitHub Pages (docs/)  ──supabase-js──▶  Supabase Postgres (RLS: owner 
 
 - `supabase/migrations/` — schema, row-level security, matching, ingestion and the daily cron job.
 - `supabase/functions/scrape/` — the scraper. `adapters.ts` holds one small reader per applicant-tracking system.
+- `supabase/functions/brand/` — finds each company's website and logo, so rows can be spotted by their logo. The website comes from the row's own links (when they aren't a job board), the careers page of a company you follow, or an exact-name match in Clearbit's public company directory; the logo is the site's icon from Google's favicon service. Companies without one show coloured initials. If a logo is wrong, type the right website in the row's **Company website** field; that choice is kept for good.
 - `supabase/functions/extract/` — turns one job link into a log row. It reads the job board's own API when it knows it (Workday, SmartRecruiters, Greenhouse, Lever, Ashby, Recruitee, Oracle, LinkedIn's public job view), otherwise the schema.org `JobPosting` data most careers pages publish for Google Jobs, otherwise the page title. Sites that only show ads to signed-in users (JobTeaser, for example) can't be read; the link is kept and you fill the row by hand.
 
 ### Supported careers sites
@@ -52,7 +53,7 @@ A posting reaches the inbox when its title contains a **field** keyword (energy,
 
 1. Create a Supabase project and run the migrations in order (SQL editor or `supabase db push`).
 2. In the Vault, add two secrets: `scrape_url` = `https://<project>.supabase.co/functions/v1/scrape`, `cron_secret` = any long random string.
-3. Deploy the functions: `supabase functions deploy scrape --no-verify-jwt` and `supabase functions deploy extract --no-verify-jwt` (both check the cron secret or the owner's login themselves).
+3. Deploy the functions: `supabase functions deploy scrape --no-verify-jwt` and `supabase functions deploy extract --no-verify-jwt` and `supabase functions deploy brand --no-verify-jwt` (all three check the cron secret or the owner's login themselves).
 4. Put your project URL and publishable key in `docs/config.js` (the publishable key is meant to be public; RLS protects the data).
 5. Enable GitHub Pages from `main` / `docs`.
 6. Open the site and create your account. **The first account created becomes the owner**; any later sign-up is refused access to the data.
