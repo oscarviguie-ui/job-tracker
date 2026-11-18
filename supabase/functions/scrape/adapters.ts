@@ -294,6 +294,162 @@ function frDate(s: string): string | null {
   return isoDate(s);
 }
 
+// ───────────────────────────── Jibe (iCIMS career sites such as careers.se.com) ─────────────────────────────
+// The search page is rendered in the browser from a public JSON endpoint: {base}/api/jobs?page=&limit=.
+// `query` narrows it (e.g. "country=France"); descriptions come with it, so pages are heavy — 100 per call.
+async function jibe(c: Company): Promise<Posting[]> {
+  const base = c.config.base.replace(/\/$/, "");
+  const q = c.config.query ? `&${c.config.query}` : "";
+  const out = new Map<string, Posting>();
+  for (let page = 1; page <= 20 && out.size < 2000; page++) {
+    const j = await getJson(`${base}/api/jobs?page=${page}&limit=100${q}`);
+    const jobs = j.jobs ?? [];
+    for (const { data: d } of jobs) {
+      if (!d?.title || d.internal) continue;
+      out.set(String(d.req_id ?? d.slug), {
+        external_id: String(d.req_id ?? d.slug), title: d.title,
+        location: d.full_location ?? d.short_location ?? d.location_name ?? null,
+        url: `${base}/jobs/${d.slug}?lang=${d.language ?? "en-us"}`, posted_at: isoDate(d.create_date ?? d.posted_date),
+      });
+    }
+    if (jobs.length < 100) break;
+  }
+  return [...out.values()];
+}
+
+// ───────────────────────────── Phenom (careers.bcg.com, careers.allianz.com, careers.enbw.com…) ─────────────────────────────
+// Every Phenom site answers POST {base}/widgets with ddoKey "refineSearch" — the same call its search page makes.
+const slugify = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "");
+async function phenom(c: Company): Promise<Posting[]> {
+  const base = c.config.base.replace(/\/$/, "");
+  const lang = c.config.lang ?? "en_global", country = c.config.country ?? "global";
+  const out = new Map<string, Posting>();
+  for (let from = 0; from < 3000; ) {
+    const j = await postJson(`${base}/widgets`, {
+      lang, deviceType: "desktop", country, pageName: "search-results", ddoKey: "refineSearch", sortBy: "Most recent",
+      subsearch: "", from, jobs: true, counts: false, all_fields: [], size: 50, clearAll: false, jdsource: "facets",
+      isSliderEnable: false, pageId: "page20", siteType: "external", keywords: c.config.keywords ?? c.search ?? "",
+      global: true, selected_fields: c.config.filter ? JSON.parse(c.config.filter) : {}, locationData: {},
+    });
+    const rs = j.refineSearch ?? {};
+    const jobs = rs.data?.jobs ?? [];
+    for (const p of jobs) {
+      const id = String(p[c.config.urlId ?? "jobId"] ?? p.jobId ?? p.jobSeqNo);
+      out.set(String(p.jobSeqNo ?? p.jobId), {
+        external_id: String(p.jobSeqNo ?? p.jobId), title: p.title,
+        location: (p.multi_location?.length > 1 ? `${p.multi_location.length} locations` : null) ?? p.location ?? p.cityStateCountry ?? null,
+        url: `${base}/${country}/${lang.split("_")[0]}/job/${id}/${slugify(p.title ?? "")}`,
+        posted_at: isoDate(p.postedDate ?? p.dateCreated),
+      });
+    }
+    from += jobs.length;
+    if (!jobs.length || from >= (rs.totalHits ?? 0)) break;
+  }
+  return [...out.values()];
+}
+
+// ───────────────────────────── Workable (apply.workable.com/{account}) ─────────────────────────────
+async function workable(c: Company): Promise<Posting[]> {
+  const acct = c.config.account;
+  const out: Posting[] = [];
+  let token: string | undefined;
+  for (let i = 0; i < 30; i++) {
+    const j = await postJson(`https://apply.workable.com/api/v3/accounts/${acct}/jobs`, { query: "", location: [], department: [], worktype: [], remote: [], ...(token ? { token } : {}) });
+    for (const p of j.results ?? []) {
+      const locs = (p.locations?.length ? p.locations : [p.location]).filter(Boolean);
+      out.push({
+        external_id: p.shortcode, title: p.title,
+        location: locs.length > 1 ? `${locs.length} locations` : [locs[0]?.city, locs[0]?.country].filter(Boolean).join(", ") || (p.remote ? "Remote" : null),
+        url: `https://apply.workable.com/${acct}/j/${p.shortcode}/`, posted_at: isoDate(p.published),
+      });
+    }
+    token = j.nextPage;
+    if (!token) break;
+  }
+  return out;
+}
+
+// ───────────────────────────── BambooHR ({company}.bamboohr.com/careers) ─────────────────────────────
+async function bamboohr(c: Company): Promise<Posting[]> {
+  const host = `https://${c.config.company}.bamboohr.com`;
+  const j = await getJson(`${host}/careers/list`);
+  return (j.result ?? []).map((p: any) => ({
+    external_id: String(p.id), title: p.jobOpeningName,
+    location: [p.location?.city ?? p.atsLocation?.city, p.location?.state ?? p.atsLocation?.country].filter(Boolean).join(", ") || null,
+    url: `${host}/careers/${p.id}`, posted_at: null,
+  }));
+}
+
+// ───────────────────────────── RSS feeds (Avature portals publish one; so do some company sites) ─────────────────────────────
+// Avature puts the location in <description>; anything longer than a line is a real description and ignored.
+async function feed(c: Company): Promise<Posting[]> {
+  const xml = await getText(c.config.url, "application/rss+xml,application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.8");
+  return xml.split(/<item[\s>]|<entry[\s>]/i).slice(1).map((it) => {
+    const link = tag(it, "link") || decode(it.match(/<link[^>]*href="([^"]+)"/i)?.[1] ?? "") || tag(it, "guid") || "";
+    const desc = stripTags(tag(it, "description") ?? "");
+    return {
+      external_id: link.match(/\/(\d{4,})\/?(?:[?#]|$)/)?.[1] ?? link, title: stripTags(tag(it, "title") ?? ""),
+      location: desc && desc.length <= 80 ? desc : null, url: link, posted_at: isoDate(tag(it, "pubDate") ?? tag(it, "published") ?? tag(it, "updated")),
+    };
+  }).filter((p) => p.title && p.url);
+}
+
+// ───────────────────────────── Sitemaps ─────────────────────────────
+// Sites that render their job list in the browser still publish every ad in sitemap.xml for Google.
+// `base` is the site (robots.txt names the sitemaps) or a sitemap URL; `pattern` picks the ad URLs, and its
+// first group, if any, is the ad's id (so the same ad in several languages counts once). The title comes from the
+// URL until the background reader opens the ad and replaces it with the real title, place and date.
+export function slugTitle(u: string): string {
+  let path = u;
+  try { path = decodeURIComponent(new URL(u).pathname); } catch { /* keep */ }
+  const segs = path.replace(/\.html?$/i, "").split("/").filter(Boolean).reverse();
+  let s = segs.find((x) => /[a-zà-ÿ]{3,}[^/]*[-_+][a-zà-ÿ]{2,}/i.test(x)) ?? segs[0] ?? "";
+  s = s.replace(/[-_][0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i, "")
+    .replace(/[-_][a-z]{2}[-_][a-z]{2}$/i, "")
+    .replace(/[-_]r[-_]?\d{4,}$/i, "").replace(/^\d{4}-\d+-/, "").replace(/^\d+[-_]/, "").replace(/[-_]\d{3,}$/, "")
+    .replace(/[-_+]+/g, " ").replace(/\bh f\b/gi, "H/F").replace(/\bf h\b/gi, "F/H").replace(/\bm w d\b/gi, "(m/w/d)").trim();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+const JOBISH = /job|offre|career|carriere|vacanc|emploi|position|stelle|recrut/i;
+async function sitemapUrls(base: string, keep: RegExp, budget = 25): Promise<{ loc: string; lastmod: string | null }[]> {
+  let queue: string[];
+  if (/\.xml(\?|$)/i.test(base)) queue = [base];
+  else {
+    const origin = new URL(base).origin;
+    const robots = await getText(`${origin}/robots.txt`, "text/plain,*/*").catch(() => "");
+    queue = [...robots.matchAll(/^\s*sitemap:\s*(\S+)/gim)].map((m) => m[1]);
+    if (!queue.length) queue = [`${origin}/sitemap.xml`];
+  }
+  const out: { loc: string; lastmod: string | null }[] = [];
+  const seen = new Set<string>();
+  while (queue.length && seen.size < budget) {
+    const u = queue.shift()!;
+    if (seen.has(u)) continue;
+    seen.add(u);
+    let xml = "";
+    try { xml = await getText(u, "application/xml,text/xml;q=0.9,*/*;q=0.8"); } catch { continue; }
+    const entries = [...xml.matchAll(/<(url|sitemap)>([\s\S]*?)<\/\1>/gi)].map((m) => ({ loc: decode(tag(m[2], "loc") ?? ""), lastmod: tag(m[2], "lastmod") }));
+    if (/<sitemapindex/i.test(xml)) {
+      const kids = entries.map((e) => e.loc).filter(Boolean);
+      const jobby = kids.filter((k) => JOBISH.test(k) || keep.test(k));
+      queue.push(...(jobby.length ? jobby : kids));
+    } else out.push(...entries.filter((e) => keep.test(e.loc)));
+  }
+  return out;
+}
+async function sitemap(c: Company): Promise<Posting[]> {
+  const keep = new RegExp(c.config.pattern, "i");
+  const out = new Map<string, Posting>();
+  for (const e of await sitemapUrls(c.config.base, keep)) {
+    const id = e.loc.match(keep)?.[1] ?? e.loc.split(/[?#]/)[0];
+    if (out.has(id)) continue;
+    const title = slugTitle(e.loc);
+    if (title.length < 4) continue;
+    out.set(id, { external_id: id, title, url: e.loc, location: null, posted_at: c.config.lastmod === "posted" ? isoDate(e.lastmod) : null });
+  }
+  return [...out.values()].slice(0, 3000);
+}
+
 // ───────────────────────────── Generic: links on a listing page ─────────────────────────────
 // For custom portals rendered on the server: collect every <a> whose href matches `pattern`.
 // Optional paging: put {{offset}} in the URL and set `step` (and `pages`, default 5).
@@ -322,6 +478,7 @@ async function links(c: Company): Promise<Posting[]> {
 
 export const ADAPTERS: Record<string, (c: Company) => Promise<Posting[]>> = {
   workday, smartrecruiters, greenhouse, lever, ashby, recruitee, teamtailor, personio, oracle, successfactors, pinpoint, links,
+  jibe, phenom, workable, bamboohr, feed, sitemap,
 };
 
 // ───────────────────────────── Detection ─────────────────────────────
@@ -368,7 +525,7 @@ export async function detectFromPage(raw: string): Promise<Detection | null> {
   const direct = detectFromUrl(raw);
   if (direct) return direct;
   let html = "";
-  try { html = await getText(raw); } catch (_) { return null; }
+  try { html = await getText(raw); } catch (_) { return detectSitemap(raw); }
   const hrefs = [...html.matchAll(/href\s*=\s*["']([^"'#]+)["']/gi)].map((m) => m[1]);
   const shapes = [/\/JobDetail\/[^/]+\/(\d+)/, /\/job\/[^"']*?\/(\d{5,})\/?$/i, /\/jobs?\/(\d{4,})/i, /\/offres?(?:-d-emploi)?\/[^"']*?([\w-]{6,})$/i, /\/annonce\/(\d+)/i];
   const ownLinks = (min: number): Detection | null => {
@@ -411,7 +568,35 @@ export async function detectFromPage(raw: string): Promise<Detection | null> {
   if (/recruitee/i.test(html)) return { ats: "recruitee", config: { base: origin } };
   if (/jobs2web|rmk-|successfactors/i.test(html)) return { ats: "successfactors", config: { base: origin } };
   if (/pinpointhq/i.test(html)) return { ats: "pinpoint", config: { base: origin } };
+  let m2;
+  if ((m2 = html.match(/apply\.workable\.com\/(?!api\b)([\w-]+)/i))) return { ats: "workable", config: { account: m2[1] }, note: `found a Workable board on the page` };
+  if ((m2 = html.match(/https?:\/\/([\w-]+)\.bamboohr\.com/i))) return { ats: "bamboohr", config: { company: m2[1] }, note: `found a BambooHR board on the page` };
+  if (/phApp\.|phenompeople/i.test(html) && /phApp\./.test(html)) return { ats: "phenom", config: { base: origin } };
+  // Avature portals (and a few others) publish their search results as RSS.
+  const rss = html.match(/href\s*=\s*["']([^"']*\/(?:SearchJobs|Jobs)\/feed\/?[^"']*)["']/i);
+  if (rss) return { ats: "feed", config: { url: new URL(decode(rss[1]), raw).toString().replace(/RecordsPerPage=\d+/i, "RecordsPerPage=500") } };
+  // Jibe career sites answer {origin}/api/jobs.
+  if (/jibe|icims/i.test(html)) {
+    try { const j = await getJson(`${origin}/api/jobs?limit=1`); if (Array.isArray(j.jobs) && j.jobs.length) return { ats: "jibe", config: { base: origin } }; } catch (_) { /* not Jibe */ }
+  }
   const few = ownLinks(2);
   if (few) return few;
-  return null;
+  return detectSitemap(raw);
+}
+
+// Last resort: ads listed in the site's sitemap. Job boards that host many employers are skipped — their sitemap
+// is everyone's ads, not this company's.
+const BOARDS = /welcometothejungle|linkedin|indeed|jobteaser|glassdoor|hellowork|apec\.fr/i;
+export async function detectSitemap(raw: string): Promise<Detection | null> {
+  let u: URL;
+  try { u = new URL(raw); } catch { return null; }
+  if (BOARDS.test(u.hostname)) return null;
+  const site = u.hostname.split(".").slice(-2).join(".");
+  const seg = /\/(jobs?|offres?(?:-d-emploi)?|offre-emploi|vacanc(?:y|ies)|vacancies-list|positions?|stellenangebote|emplois?)\/(?:[^?#]*\/)?[^/?#]*[a-z]{3,}[-_][a-z]{2,}/i;
+  const urls = (await sitemapUrls(raw, seg, 12).catch(() => [])).filter((e) => { try { return new URL(e.loc).hostname.endsWith(site); } catch { return false; } });
+  if (urls.length < 3) return null;
+  const first = new URL(urls[0].loc);
+  const key = first.pathname.match(seg)![1];
+  const pattern = `${first.hostname.replace(/[.]/g, "\\.")}/(?:[\\w-]+/)*${key}/`;
+  return { ats: "sitemap", config: { base: u.origin, pattern }, note: `${urls.length} ads listed in the site's sitemap` };
 }

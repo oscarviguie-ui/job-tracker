@@ -6,7 +6,7 @@
 // "ASAP"), read from the job board's own fields, the title, or a labelled phrase in the ad ("Date de début : …").
 //
 // Reads the applicant-tracking system's own API when the link is from one we know (Workday, SmartRecruiters,
-// Greenhouse, Lever, Ashby, Recruitee), otherwise the schema.org JobPosting data that most careers pages embed
+// Greenhouse, Lever, Ashby, Recruitee, Workable), otherwise the schema.org JobPosting data that most careers pages embed
 // for Google Jobs, otherwise the page's title and meta tags. Callers: the web app (owner's JWT) or admin scripts
 // (x-cron-secret).
 import { createClient } from "npm:@supabase/supabase-js@2.45.4";
@@ -200,6 +200,23 @@ async function recruitee(u: URL): Promise<Got | null> {
     company: clean(p.company_name), text: htmlToText(p.description ?? "") + "\n" + htmlToText(p.requirements ?? "") };
 }
 
+// Workable: apply.workable.com/{account}/j/{shortcode}. The account record carries the employer's own name.
+async function workable(u: URL): Promise<Got | null> {
+  if (u.hostname !== "apply.workable.com") return null;
+  const [acct, j, code] = u.pathname.split("/").filter(Boolean);
+  if (!acct || j !== "j" || !code) return null;
+  const p = await fetchJson(`https://apply.workable.com/api/v2/accounts/${acct}/jobs/${code}`);
+  const a = await fetchJson(`https://apply.workable.com/api/v1/accounts/${acct}`).catch(() => null);
+  const locs = (p.locations?.length ? p.locations : [p.location]).filter(Boolean);
+  const html = [p.description, p.requirements, p.benefits].filter(Boolean).join("\n");
+  return {
+    role: clean(p.title), company: clean(a?.name),
+    location: locs.length > 1 ? locs.map((l: any) => l.city).filter(Boolean).join(" · ") : clean(locs[0]?.city) ?? (p.remote ? "Remote" : null),
+    description: summarise(p.description), date_posted: isoDate(p.published),
+    contract: contractFrom(p.title, p.type, htmlToText(html)), text: htmlToText(html),
+  };
+}
+
 async function oracle(u: URL): Promise<Got | null> {
   if (!u.hostname.endsWith(".oraclecloud.com")) return null;
   const site = u.pathname.match(/\/sites\/([\w-]+)/)?.[1];
@@ -315,13 +332,32 @@ function splitTitle(row: Got, site: string | null | undefined) {
   }
 }
 
+// Job platforms many employers share. Their name is never the company: "Workable" on a Rystad Energy ad.
+const PLATFORM = /^(workday|myworkdayjobs|smartrecruiters|greenhouse|lever|ashby|ashbyhq|teamtailor|recruitee|personio|workable|bamboohr|hibob|breezy(?:\.hr)?|jobvite|jazzhr|applytojob|pinpoint|pinpointhq|icims|taleo|successfactors|sapsf|oracle(?:cloud)?|cornerstone(?:ondemand)?|csod|avature|phenom|eightfold|talentsoft|talent-soft|digitalrecruiters|taleez|flatchr|beetween|softgarden|welcomekit|welcome to the jungle|welcometothejungle|jobteaser|indeed|linkedin|glassdoor|hellowork|apec|join|homerun|jobylon|zohorecruit|recruiterbox|teamtailor jobs|careers page)$/i;
+const isPlatform = (s: string | null | undefined) => !!s && PLATFORM.test(s.trim().replace(/\s*(careers?|jobs|recrutement|emplois?)$/i, ""));
+
 function companyFromHost(host: string): string | null {
   const h = host.replace(/^www\./, "");
   const skip = /^(jobs|careers|career\d*|carrieres|join|apply|recrutement|emplois?|talent|boards|job-boards)\./;
   const base = h.replace(skip, "").split(".")[0];
-  if (/^(myworkdayjobs|smartrecruiters|greenhouse|lever|ashbyhq|teamtailor|recruitee|personio|jobteaser|welcometothejungle|linkedin|indeed|oraclecloud|successfactors|sapsf|taleo|icims)$/.test(base)) return null;
+  if (isPlatform(base)) return null;
   return base ? base.charAt(0).toUpperCase() + base.slice(1) : null;
 }
+
+// On a shared platform the employer is named in the address: apply.workable.com/rystad-energy,
+// jobs.lever.co/octoenergy, northleaf.bamboohr.com, acme.teamtailor.com, acme.jobs.personio.de.
+function boardSlug(u: URL): string | null {
+  const h = u.hostname.toLowerCase();
+  const sub = h.match(/^([\w-]+)\.(?:bamboohr\.com|teamtailor\.com|recruitee\.com|breezy\.hr|pinpointhq\.com|careers\.hibob\.com|jobs\.personio\.(?:de|com)|applytojob\.com|wd\d+\.myworkdayjobs\.com)$/);
+  if (sub) return sub[1];
+  if (/^(apply\.workable\.com|(jobs|careers)\.smartrecruiters\.com|(boards|job-boards)(\.eu)?\.greenhouse\.io|jobs\.(eu\.)?lever\.co|jobs\.ashbyhq\.com|jobs\.jobvite\.com)$/.test(h)) {
+    return u.searchParams.get("for") ?? u.pathname.split("/").filter(Boolean)[0] ?? null;
+  }
+  return null;
+}
+const squash = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+// "rystad-energy" → "Rystad Energy"; "octoenergy" stays one word.
+const slugName = (s: string) => s.replace(/\d+$/, "").split(/[-_]+/).filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || null;
 
 const SHARED_BOARDS = /^(jobs|careers)\.smartrecruiters\.com$|^(boards|job-boards)\.(eu\.)?greenhouse\.io$|^jobs\.(eu\.)?lever\.co$|^jobs\.ashbyhq\.com$|^apply\.workable\.com$/;
 type Known = { companies: { name: string; careers_url: string | null; config: any }[]; posting: { title: string; location: string | null; posted_at: string | null; company: string | null } | null };
@@ -330,7 +366,7 @@ async function extract(raw: string, known: Known): Promise<{ row: Row; source: s
   const u = new URL(raw.trim());
   let source = "page";
   let got: Got = {};
-  for (const [name, fn] of [["Workday", workday], ["SmartRecruiters", smartrecruiters], ["Greenhouse", greenhouse], ["Lever", lever], ["Ashby", ashby], ["Recruitee", recruitee], ["Oracle", oracle], ["LinkedIn", linkedin]] as const) {
+  for (const [name, fn] of [["Workday", workday], ["SmartRecruiters", smartrecruiters], ["Greenhouse", greenhouse], ["Lever", lever], ["Ashby", ashby], ["Recruitee", recruitee], ["Workable", workable], ["Oracle", oracle], ["LinkedIn", linkedin]] as const) {
     try { const r = await fn(u); if (r?.role) { got = r; source = name; break; } } catch { /* fall back to the page */ }
   }
   if (!got.role) {
@@ -358,7 +394,21 @@ async function extract(raw: string, known: Known): Promise<{ row: Row; source: s
     try { return !!c.careers_url && pages.some((p) => board(p) === board(new URL(c.careers_url!))); } catch { return false; }
   });
   if (followed && !/^(www\.)?(linkedin|welcometothejungle|indeed|jobteaser)\./.test(u.hostname) && !/jobteaser\.com$/.test(u.hostname)) got.company = followed.name;
-  got.company ??= clean(got.site) ?? companyFromHost(hosts[1]);
+  // A platform's name is never the employer. On a shared platform, the employer's slug in the address
+  // ("rystad-energy") names it: matched to a company you follow when one fits, else spelled out.
+  if (isPlatform(got.company)) got.company = null;
+  const slug = pages.map(boardSlug).find(Boolean);
+  if (!followed && slug) {
+    const fits = companies.find((c) => squash(c.name) === squash(slug) || squash(c.name).startsWith(squash(slug)) && squash(slug).length >= 5
+      || Object.values(c.config ?? {}).some((v) => typeof v === "string" && v.toLowerCase() === slug.toLowerCase()));
+    if (fits) got.company = fits.name;
+  }
+  got.company ??= (isPlatform(got.site) ? null : clean(got.site)) ?? (slug ? slugName(slug) : null) ?? companyFromHost(hosts[1]);
+  // "Graduate Analyst - Summer 2027 - Rystad Energy": drop the employer's name from the end of the title.
+  if (got.role && got.company) {
+    const esc = got.company.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    got.role = got.role.replace(new RegExp(`(?:\\s*[-–—|@,]\\s*(?:at\\s+)?|\\s+at\\s+)${esc}\\s*$`, "i"), "").trim() || got.role;
+  }
   // Dates: the posting date the board gave, else one stated in the ad. The start date comes from a field the
   // board keeps, else the title or the ad's own words; a month without a year is placed after the posting date.
   const text = got.text ?? "";
@@ -396,7 +446,7 @@ async function enrich(db: any, limit: number) {
     out.titles += rows.length;
     if (Date.now() - started > 50000) return out;
   }
-  const { data: todo } = await db.from("postings").select("id, url, title, location, posted_at, first_seen, companies(name)")
+  const { data: todo } = await db.from("postings").select("id, url, title, location, posted_at, first_seen, companies(name, ats)")
     .eq("matched", true).eq("is_open", true).eq("state", "new").or("start_checked.is.null,start_checked.eq.title")
     .order("posted_sort", { ascending: false }).limit(limit);
   const { data: companies } = await db.from("companies").select("name, careers_url, config");
@@ -411,7 +461,12 @@ async function enrich(db: any, limit: number) {
       const ref = row?.date_posted ?? p.posted_at ?? String(p.first_seen).slice(0, 10);
       const st = row?.starts ? startFrom(null, `Start date: ${row.starts}`, ref) : null;
       if (st) out.adStarts++;
-      results.push({ id: p.id, starts: st?.text ?? null, starts_on: st?.from ?? null, summary: row?.description ?? null, posted_at: row?.date_posted ?? null, checked: "ad" });
+      // Sitemap and browser sources only know the URL or link text: take the ad's own title and place.
+      const rough = ["sitemap", "browser"].includes(p.companies?.ats);
+      results.push({
+        id: p.id, starts: st?.text ?? null, starts_on: st?.from ?? null, summary: row?.description ?? null, posted_at: row?.date_posted ?? null, checked: "ad",
+        title: rough && row?.role && row.role.length <= 200 ? row.role : null, location: rough ? row?.location ?? null : null,
+      });
     }
   }));
   if (results.length) {
