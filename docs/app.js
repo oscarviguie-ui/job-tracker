@@ -48,6 +48,7 @@ const S = {
   season: null,                  // which round of applications the log shows; null = the current one
   drawer: null,          // { type: 'app'|'company', id|null }
   detect: null,          // detection preview in Companies
+  coCategory: "",        // Companies page: show one category
   newCount: 0,
   brands: {},                    // company key → { domain, icon_url } from the brand function
 };
@@ -1086,12 +1087,19 @@ function companyHealth(c) {
   };
   return `<span class="health ${c.last_status}" title="${esc(c.last_error ?? "")}">${map[c.last_status] ?? c.last_status}</span>`;
 }
+const CATEGORIES = ["Oil & gas major", "Utility & grid", "Trading house", "Engineering & equipment", "Bank", "Infrastructure & pension fund",
+  "Development bank", "Agency & regulator", "Market data & research", "Consulting"];
 function companiesView() {
   const d = S.detect;
   const watched = S.companies.filter((c) => c.active && c.ats !== "unknown").length;
+  const cats = [...new Set([...CATEGORIES, ...S.companies.map((c) => c.category).filter(Boolean)])];
+  const catRank = (c) => { const i = cats.indexOf(c.category); return i < 0 ? 99 : i; };
+  const list = S.companies.filter((c) => !S.coCategory || (c.category ?? "") === (S.coCategory === "-" ? "" : S.coCategory))
+    .sort((a, b) => catRank(a) - catRank(b) || a.name.localeCompare(b.name, "fr", { sensitivity: "base" }));
+  let lastCat = null;
   return `
     <div class="page-head">
-      <div class="grow"><h1>Companies</h1><p class="sub">${watched} of ${S.companies.length} careers pages are checked every morning at 06:30. Paste a careers page or any job link from a company to add it.</p></div>
+      <div class="grow"><h1>Companies</h1><p class="sub">${watched} of ${S.companies.length} careers pages are checked every morning at 06:30. Paste a careers page or any job link from a company to add it. “Check by hand” sites can't be read automatically: pasting one of their job links here usually finds the job board behind them.</p></div>
       <button class="btn" data-act="run-all">Check all now</button>
     </div>
     <form class="panel panel-pad" id="add-company" style="margin-bottom:22px">
@@ -1102,10 +1110,17 @@ function companiesView() {
       </div>
       ${d && !d.loading ? detectResult(d) : ""}
     </form>
+    <div class="toolbar">
+      <select id="co-cat" style="width:auto" aria-label="Category"><option value="">All categories (${S.companies.length})</option>${cats.map((c) => { const n = S.companies.filter((x) => x.category === c).length; return n ? `<option value="${esc(c)}" ${S.coCategory === c ? "selected" : ""}>${esc(c)} (${n})</option>` : ""; }).join("")}<option value="-" ${S.coCategory === "-" ? "selected" : ""}>No category</option></select>
+      <span class="faint small"><span class="tag big">Big</span> companies can show postings from your relocation cities too.</span>
+    </div>
     <div class="table-wrap"><table class="stack">
       <thead><tr><th>Company</th><th class="hide-m">Source</th><th>Status</th><th class="num hide-m">Matches</th><th class="hide-m">Last checked</th><th></th></tr></thead>
-      <tbody>${S.companies.map((c) => `<tr>
-        <td class="co"><span class="co-cell">${logoHtml(c.name, "sm")}${c.careers_url ? `<a href="${safeUrl(c.careers_url)}" target="_blank" rel="noopener">${esc(c.name)}</a>` : esc(c.name)}</span></td>
+      <tbody>${list.map((c) => {
+        const head = !S.coCategory && (c.category ?? "") !== lastCat ? `<tr class="cat-head"><th colspan="6">${esc(c.category || "No category")}</th></tr>` : "";
+        lastCat = c.category ?? "";
+        return `${head}<tr>
+        <td class="co"><span class="co-cell">${logoHtml(c.name, "sm")}${c.careers_url ? `<a href="${safeUrl(c.careers_url)}" target="_blank" rel="noopener">${esc(c.name)}</a>` : esc(c.name)}${c.big ? ` <span class="tag big" title="Big company: postings in your relocation cities count too">Big</span>` : ""}</span></td>
         <td class="hide-m"><span class="src">${esc(ATS_LABEL[c.ats] ?? c.ats)}</span>${c.country ? `<span class="faint small"> in ${esc(c.country)}</span>` : ""}${c.search ? `<span class="faint small"> for “${esc(c.search)}”</span>` : ""}</td>
         <td class="status-cell">${companyHealth(c)}</td>
         <td class="num hide-m">${c.matched_open ?? ""}</td>
@@ -1115,7 +1130,8 @@ function companiesView() {
           <button class="btn sm ghost" data-act="toggle-company" data-id="${c.id}">${c.active ? "Pause" : "Resume"}</button>
           <button class="btn sm ghost" data-act="edit-company" data-id="${c.id}">Edit</button>
         </div></td>
-      </tr>`).join("")}</tbody>
+      </tr>`;
+      }).join("")}</tbody>
     </table>${S.companies.length ? "" : `<div class="empty">No companies yet.</div>`}</div>`;
 }
 function detectResult(d) {
@@ -1196,15 +1212,17 @@ function settingsView() {
   const s = S.settings;
   return `
     <div class="page-head"><div class="grow"><h1>Settings</h1>
-      <p class="sub">A posting reaches your inbox when its title names your field and your level, avoids the hidden words, and is in one of your locations. Matching ignores case and accents. A keyword matches the start of a word (“analyst” also matches “analystes”); put it in double quotes to match the whole word only: <code>"market"</code> skips “marketing”.</p></div></div>
+      <p class="sub">A posting reaches your inbox when its title names your field and your level, avoids the hidden words, and is in one of your locations (or a relocation city, for big companies). Matching ignores case and accents. A keyword matches the start of a word (“analyst” also matches “analystes”); put it in double quotes to match the whole word only: <code>"market"</code> skips “marketing”.</p></div></div>
     <form id="settings-form" class="settings-grid">
       <section><h2>Field: titles mentioning any of</h2>${chipEditor("include_keywords", s.include_keywords, "Add a keyword and press Enter")}
         <p class="faint small" style="margin:0">Skipped for companies marked “every role here is in my field”. Leave empty to accept any field.</p></section>
       <section><h2>Level: and any of</h2>${chipEditor("role_keywords", s.role_keywords ?? [], "Add a keyword and press Enter")}
         <p class="faint small" style="margin:0">Leave empty to accept any level.</p></section>
       <section><h2>Hide titles containing</h2>${chipEditor("exclude_keywords", s.exclude_keywords, "Add a keyword and press Enter")}</section>
-      <section><h2>Locations</h2>${chipEditor("locations", s.locations, "Add a city, region or country")}
+      <section><h2>Locations: any company</h2>${chipEditor("locations", s.locations, "Add a city, region or country")}
         <p class="faint small" style="margin:0">Postings without a location are always kept.</p></section>
+      <section><h2>Relocation cities: big companies only</h2>${chipEditor("relocation_locations", s.relocation_locations ?? [], "Add a city or country")}
+        <p class="faint small" style="margin:0">Places you'd move to for a big company. Mark companies as big on the Companies page.</p></section>
       <section><h2>When you can start</h2>
         <div class="window-fields">
           <label class="field"><span>Earliest start</span><input type="month" name="available_from" value="${esc((s.available_from ?? "").slice(0, 7))}"></label>
@@ -1224,7 +1242,7 @@ function settingsView() {
 async function saveSettings(form) {
   const patch = {
     include_keywords: S.settings.include_keywords, role_keywords: S.settings.role_keywords ?? [],
-    exclude_keywords: S.settings.exclude_keywords, locations: S.settings.locations,
+    exclude_keywords: S.settings.exclude_keywords, locations: S.settings.locations, relocation_locations: S.settings.relocation_locations ?? [],
     follow_up_days: Number(form.follow_up_days.value) || 14, updated_at: new Date().toISOString(),
     available_from: form.available_from.value ? `${form.available_from.value}-01` : null,
     available_until: form.available_until.value ? `${form.available_until.value}-01` : null,
@@ -1373,6 +1391,10 @@ function companyDrawer(c) {
         <label class="field"><span>Only postings in country</span><input type="text" name="country" placeholder="e.g. France" value="${esc(c.country ?? "")}"></label>
         <label class="field"><span>Only postings matching</span><input type="text" name="search" placeholder="e.g. energy" value="${esc(c.search ?? "")}"></label>
         <label class="field"><span>Source</span><select name="ats">${Object.entries(ATS_LABEL).map(([k, l]) => `<option value="${k}" ${c.ats === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        <label class="field"><span>Category</span><input type="text" name="category" list="categories" value="${esc(c.category ?? "")}"></label>
+        <datalist id="categories">${CATEGORIES.map((x) => `<option value="${esc(x)}">`).join("")}</datalist>
+        <label class="check wide"><input type="checkbox" name="big" ${c.big ? "checked" : ""}>
+          <span>Big company <span class="faint">— worth relocating for: postings in your relocation cities count too</span></span></label>
         <label class="check wide"><input type="checkbox" name="in_field" ${c.in_field ? "checked" : ""}>
           <span>Every role here is in my field <span class="faint">— skip the field keywords, keep the level, hidden words and locations</span></span></label>
         <label class="field wide"><span>Source settings (JSON)</span><textarea name="config" rows="4" spellcheck="false">${esc(JSON.stringify(c.config, null, 2))}</textarea></label>
@@ -1394,7 +1416,7 @@ async function saveCompany() {
   let config;
   try { config = JSON.parse(fd.get("config") || "{}"); } catch { return toast("Source settings must be valid JSON."); }
   const v = (k) => ((fd.get(k) ?? "").toString().trim() || null);
-  const row = { name: v("name"), careers_url: v("careers_url"), country: v("country"), search: v("search"), ats: v("ats"), notes: v("notes"), config, in_field: fd.get("in_field") === "on" };
+  const row = { name: v("name"), careers_url: v("careers_url"), country: v("country"), search: v("search"), ats: v("ats"), notes: v("notes"), config, in_field: fd.get("in_field") === "on", big: fd.get("big") === "on", category: v("category") };
   const { data, error } = await sb.from("companies").update(row).eq("id", S.drawer.id).select().single();
   if (error) return fail(error, "Couldn't save");
   S.companies = S.companies.map((c) => (c.id === data.id ? { ...c, ...data } : c));
@@ -1421,6 +1443,7 @@ function bindView() {
     qInbox.addEventListener("input", () => { clearTimeout(t); t = setTimeout(async () => { S.inboxQuery = qInbox.value.trim(); await loadInbox(); render(); $("#inbox-q").focus(); }, 250); });
   }
   $("#inbox-co")?.addEventListener("change", async (e) => { S.inboxCompany = e.target.value; await loadInbox(); render(); });
+  $("#co-cat")?.addEventListener("change", (e) => { S.coCategory = e.target.value; render(); });
   const qApps = $("#apps-q");
   if (qApps) qApps.addEventListener("input", () => {
     S.appsQuery = qApps.value;

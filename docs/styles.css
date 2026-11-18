@@ -593,3 +593,11 @@ div.pending-row { padding: 14px 16px; border: 1px dashed var(--line); border-rad
   .toolbar .seg { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
   .toolbar .seg button { white-space: nowrap; }
 }
+
+/* companies: categories and big companies */
+.tag.big { background: color-mix(in oklab, var(--grid) 14%, var(--surface)); color: var(--grid); margin-left: 6px; }
+table.stack tr.cat-head th {
+  text-align: left; padding: 16px 12px 6px; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); background: var(--bg); border-bottom: 1px solid var(--line);
+}
+@media (max-width: 760px) { table.stack tr.cat-head { display: block; padding: 0; } table.stack tr.cat-head th { display: block; } }
