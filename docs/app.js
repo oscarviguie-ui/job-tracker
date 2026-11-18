@@ -38,10 +38,12 @@ const S = {
   inboxTab: "new",       // new | all | dismissed
   inboxQuery: "",
   inboxCompany: "",
+  inboxKind: "",         // "" = every type, else graduate | internship | vie | job
   cursor: 0,
   appsQuery: "",
   sort: { key: null, dir: 1 },   // null = the log's own order (oldest row first, like the Excel)
-  filter: null,                  // status shown in the log, null = all
+  colFilters: loadColFilters(),  // Excel-style column filters: { key: { in: [values] } | { has: "text" } }
+  fmenu: null,                   // the open column menu: { key }
   pendingLink: null,             // a link shared to the app, waiting for Save for later / Already applied
   season: null,                  // which round of applications the log shows; null = the current one
   drawer: null,          // { type: 'app'|'company', id|null }
@@ -52,6 +54,7 @@ const S = {
 
 function localGet(k, d) { try { return localStorage.getItem("jt:" + k) ?? d; } catch { return d; } }
 function localSet(k, v) { try { localStorage.setItem("jt:" + k, v); } catch { /* private mode */ } }
+function loadColFilters() { try { return JSON.parse(localGet("colFilters", "{}")) ?? {}; } catch { return {}; } }
 
 // ───────────────────────────── helpers ─────────────────────────────
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -106,14 +109,26 @@ async function loadCore() {
   S.newCount = n.count ?? 0;
 }
 async function loadInbox() {
-  let q = sb.from("postings").select("*, companies(name)").order("first_seen", { ascending: false }).order("score", { ascending: false }).limit(400);
+  // Newest postings first (boards without a posting date fall back to the day the ad was first seen),
+  // then by start date (soonest first, none last), then by type: graduate programmes, internships, VIE, jobs.
+  let q = sb.from("postings").select("*, companies(name)").order("posted_sort", { ascending: false }).order("kind_rank").order("score", { ascending: false }).limit(400);
   if (S.inboxTab === "new") q = q.eq("state", "new").eq("matched", true).eq("is_open", true);
   if (S.inboxTab === "all") q = q.eq("is_open", true);
   if (S.inboxTab === "dismissed") q = q.eq("state", "dismissed");
   if (S.inboxCompany) q = q.eq("company_id", S.inboxCompany);
   if (S.inboxQuery) q = q.ilike("title", `%${S.inboxQuery}%`);
+  if (S.inboxKind) q = q.eq("kind", S.inboxKind);
   const { data, error } = await q;
   if (error) throw error;
+  for (const p of data) {
+    // Start dates are read from the title ("Stage – Février 2027", "Graduate Programme (Sept 2027 intake)").
+    const st = p.starts ? { text: p.starts, from: p.starts_on } : startFrom(p.title, null, p.posted_at ?? today());
+    p._starts = st?.text ?? null;
+    p._startsOn = st?.from ?? null;
+  }
+  data.sort((a, b) => String(b.posted_sort ?? "").localeCompare(String(a.posted_sort ?? ""))
+    || String(a._startsOn ?? "9999").localeCompare(String(b._startsOn ?? "9999"))
+    || (a.kind_rank ?? 9) - (b.kind_rank ?? 9) || (b.score ?? 0) - (a.score ?? 0));
   S.inbox = data;
   S.cursor = Math.min(S.cursor, Math.max(0, data.length - 1));
 }
@@ -216,8 +231,8 @@ function inboxView() {
   } else {
     let lastDay = "";
     body = `<div class="feed" id="feed">${rows.map((p, i) => {
-      const dayKey = (p.first_seen ?? "").slice(0, 10);
-      const head = S.inboxTab === "new" && dayKey !== lastDay ? `<div class="day-head">Found ${esc(dayLabel(dayKey))}</div>` : "";
+      const dayKey = String(p.posted_sort ?? "").slice(0, 10);
+      const head = dayKey !== lastDay ? `<div class="day-head">Posted ${esc(dayLabel(dayKey))}</div>` : "";
       lastDay = dayKey;
       return head + postingRow(p, i);
     }).join("")}</div>`;
@@ -226,7 +241,7 @@ function inboxView() {
     <div class="page-head">
       <div class="grow">
         <h1>${S.inboxTab === "new" ? `${S.newCount} new ${S.newCount === 1 ? "posting" : "postings"}` : "Postings"}</h1>
-        <p class="sub">Matched against your keywords and locations. Track the ones worth applying to; dismiss the rest.</p>
+        <p class="sub">Matched against your keywords and locations, newest postings first, then by start date and type. Track the ones worth applying to; dismiss the rest.</p>
       </div>
       ${S.inboxTab === "new" && rows.length ? `<button class="btn" data-act="dismiss-visible">Dismiss all ${rows.length}</button>` : ""}
     </div>
@@ -234,10 +249,14 @@ function inboxView() {
       <div class="seg" role="group" aria-label="Which postings">${tabs.map(([id, l]) => `<button data-inbox-tab="${id}" aria-pressed="${S.inboxTab === id}">${l}</button>`).join("")}</div>
       <input class="search" type="search" id="inbox-q" placeholder="Search titles" value="${esc(S.inboxQuery)}">
       <select id="inbox-co" style="width:auto"><option value="">All companies</option>${companyOpts}</select>
+      <div class="seg" role="group" aria-label="Type">${KINDS.map(([id, l]) => `<button data-inbox-kind="${id}" aria-pressed="${S.inboxKind === id}">${l}</button>`).join("")}</div>
       <span class="faint small hide-m">Keys: j / k to move, t to track, d to dismiss, o to open</span>
     </div>
     ${body}`;
 }
+const KINDS = [["", "All types"], ["graduate", "Graduate programmes"], ["internship", "Internships"], ["vie", "VIE"], ["job", "Jobs"]];
+const KIND_LABEL = { graduate: "Graduate programme", internship: "Internship", vie: "VIE", apprenticeship: "Apprenticeship" };
+const KIND_CONTRACT = { graduate: "Graduate Program", internship: "Stage", vie: "VIE", apprenticeship: "Alternance" };
 function dayLabel(d) {
   if (!d) return "";
   const diff = daysBetween(d);
@@ -255,8 +274,10 @@ function postingRow(p, i) {
       <a class="post-title" href="${safeUrl(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>
       <div class="post-meta">
         <span class="company">${logoHtml(p.companies?.name, "sm")}${esc(p.companies?.name)}</span>
+        ${KIND_LABEL[p.kind] ? `<span class="tag kind-${esc(p.kind)}">${KIND_LABEL[p.kind]}</span>` : ""}
         ${p.location ? `<span>${esc(p.location)}</span>` : ""}
-        ${p.posted_at ? `<span>Posted ${esc(fmtDate(p.posted_at))}</span>` : ""}
+        ${p._starts ? `<span>Starts ${esc(p._starts)}</span>` : ""}
+        ${p.posted_at ? `<span>Posted ${esc(fmtDate(p.posted_at))}</span>` : `<span title="This board doesn't publish posting dates">First seen ${esc(fmtDate(p.first_seen))}</span>`}
         ${!p.baseline && S.inboxTab === "new" ? `<span class="tag new">New listing</span>` : ""}
         ${!p.is_open ? `<span class="tag closed">Closed</span>` : ""}
         ${!p.matched && S.inboxTab !== "new" ? `<span class="tag">Outside your filters</span>` : ""}
@@ -274,7 +295,7 @@ async function trackPosting(id) {
   if (!p) return;
   const { data, error } = await sb.from("applications").insert({
     season: currentSeason(), status: "saved", company: p.companies?.name ?? "", company_id: p.company_id, posting_id: p.id, role: p.title,
-    location: p.location, url: p.url, date_posted: p.posted_at, contract: guessContract(p.title),
+    location: p.location, url: p.url, date_posted: p.posted_at, contract: KIND_CONTRACT[p.kind] ?? guessContract(p.title), starts: p._starts ?? null,
   }).select().single();
   if (error) return fail(error, "Couldn't track it");
   await sb.from("postings").update({ state: "tracked", application_id: data.id }).eq("id", id);
@@ -392,7 +413,7 @@ const COLS = [
   { key: "location", label: "Location", kind: "text", w: 104 },
   { key: "description", label: "Description", kind: "long", w: 0 },
   { key: "date_posted", label: "Posted", kind: "date", w: 76, title: "Date Posted" },
-  { key: "url", label: "Link", kind: "link", w: 50 },
+  { key: "url", label: "Link", kind: "link", w: 66 },
   { key: "status", label: "Status", kind: "status", w: 128 },
   { key: "applied_on", label: "Applied", kind: "date", w: 76, title: "Application Date" },
   { key: "response_on", label: "Reply", kind: "reply", w: 104, title: "Response Date · Response Time (days)" },
@@ -440,14 +461,18 @@ const currentSeason = () => S.settings?.current_season ?? 2;
 const shownSeason = () => S.season ?? currentSeason();
 const seasonRows = (n = shownSeason()) => S.apps.filter((a) => (a.season ?? 2) === n);
 const rowNumber = (a) => seasonRows(a.season ?? 2).indexOf(a) + 1;
-function sheetRows() {
+// The log's rows: this season, through the search box and the column filters, in the chosen order.
+// sheetRows(key) leaves out that column's own filter and the ordering: it's what the column's menu offers.
+function sheetRows(skip) {
   const q = fold(S.appsQuery.trim());
-  let list = seasonRows().filter((a) => (!S.filter || a.status === S.filter || (S.filter === "applied" && a.status === "no_response"))
+  let list = seasonRows().filter((a) => passesFilters(a, skip)
     && (!q || [a.company, a.role, a.location, a.description, a.contract, a.notes].some((v) => fold(v).includes(q))));
+  if (skip !== undefined) return list;
   const { key, dir } = S.sort;
   if (!key) return [...list].reverse(); // newest first: what you just added is at the top
   // Empty dates sort last either way round.
   const order = (a) => (key === "status" ? STATUSES.findIndex((x) => x.id === a.status)
+    : key === "contract" ? (a.contract ? (KIND_ORDER.indexOf(contractKind(a.contract)) + 1 || 50) : dir > 0 ? 99 : 0)
     : key === "starts" ? startDay(a) ?? (dir > 0 ? "9999" : "")
     : key === "date_posted" ? a.date_posted ?? (dir > 0 ? "9999" : "") : a[key] ?? "");
   return [...list].sort((a, b) => {
@@ -455,6 +480,198 @@ function sheetRows() {
     return dir * (typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), "fr", { numeric: true, sensitivity: "base" }));
   });
 }
+
+// ── Excel-style column filters ──
+// Each column's menu lists the values in that column (what's left after the other filters), with counts,
+// like Excel's AutoFilter. Types are grouped ("internship" and "Stage" are both Internship), dates by month.
+const KIND_ORDER = ["Graduate programme", "Internship", "VIE", "Apprenticeship", "Fixed-term (CDD)", "Permanent (CDI)"];
+function contractKind(v) {
+  const s = fold(v).trim();
+  if (!s) return "";
+  if (/\bv\.?i\.?e\b|volontariat/.test(s)) return "VIE";
+  if (/altern|apprenti/.test(s)) return "Apprenticeship";
+  if (/stag|\bintern|traineeship|summer|off.?cycle|placement/.test(s)) return "Internship";
+  if (/grad|jeune.*dipl|trainee|rotational|young prof|program/.test(s)) return "Graduate programme";
+  if (/\bcdd\b|fixed|temporar/.test(s)) return "Fixed-term (CDD)";
+  if (/\bcdi\b|full|perman/.test(s)) return "Permanent (CDI)";
+  return String(v).trim();
+}
+const STATUS_GROUP = { no_response: "applied", withdrawn: "skipped" };
+const DATE_KEYS = ["date_posted", "applied_on", "response_on"];
+// The value a row shows in a column's filter list ("" = blank).
+function fval(a, key) {
+  const v = a[key];
+  if (key === "status") return STATUS[STATUS_GROUP[a.status] ?? a.status]?.label ?? STATUS.saved.label;
+  if (key === "contract") return contractKind(v);
+  if (key === "starts") { const r = readStart(v); return r ? (r.text === "ASAP" ? "ASAP" : monthName(r.from)) : String(v ?? "").trim(); }
+  if (DATE_KEYS.includes(key)) return v ? monthName(v) : "";
+  if (key === "url") return v ? "Has a link" : "";
+  return String(v ?? "").replace(/\s+/g, " ").trim();
+}
+function passesFilters(a, skip) {
+  for (const [k, f] of Object.entries(S.colFilters)) {
+    if (k === skip || !f) continue;
+    if (typeof f.has === "string") { if (!fold(a[k]).includes(fold(f.has))) return false; }
+    else if (Array.isArray(f.in) && !f.in.includes(fval(a, k))) return false;
+  }
+  return true;
+}
+const activeFilters = () => Object.entries(S.colFilters).filter(([k, f]) => f && COLS.some((c) => c.key === k));
+function setFilter(key, f) {
+  if (f) S.colFilters[key] = f; else delete S.colFilters[key];
+  localSet("colFilters", JSON.stringify(S.colFilters));
+}
+function clearFilters() { S.colFilters = {}; localSet("colFilters", "{}"); }
+// "Nov 2026" → "2026-11" so months sort in time order; ASAP first, anything unreadable last.
+const monthSortKey = (x) => {
+  if (x === "ASAP") return "0000";
+  const d = new Date(`1 ${x} 12:00`);
+  return isNaN(d.getTime()) ? `9999${x}` : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+function sortValues(key, values) {
+  const rank = key === "status" ? (x) => STATUSES.findIndex((s) => !s.legacy && s.label === x)
+    : key === "contract" ? (x) => (KIND_ORDER.indexOf(x) + 1 || 50) : null;
+  const newestFirst = DATE_KEYS.includes(key), byMonth = newestFirst || key === "starts";
+  return values.sort((x, y) => (x === "") - (y === "")
+    || (rank ? rank(x) - rank(y) : 0)
+    || (byMonth ? (newestFirst ? -1 : 1) * monthSortKey(x).localeCompare(monthSortKey(y)) : 0)
+    || x.localeCompare(y, "fr", { sensitivity: "base", numeric: true }));
+}
+const ICON_CARET = `<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const ICON_FUNNEL = `<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18l-7 8.5V19l-4 2v-8.5z" fill="currentColor"/></svg>`;
+function filterSummary(f) {
+  if (typeof f.has === "string") return `contains “${esc(f.has)}”`;
+  const vals = f.in.map((v) => (v ? esc(v) : "(Blanks)"));
+  return !vals.length ? "nothing" : vals.length <= 2 ? vals.join(", ") : `${vals.length} values`;
+}
+// The line under the toolbar: what's filtered, how many rows are left, and on a phone the way into the filters.
+function filterBar() {
+  const on = activeFilters(), mobile = mobileQuery.matches;
+  if (!on.length && !mobile) return `<div class="fbar" id="fbar" hidden></div>`;
+  const shown = sheetRows().length, total = seasonRows().length;
+  return `<div class="fbar" id="fbar">
+    ${mobile ? `<button type="button" class="btn sm" data-fmenu="${on[0]?.[0] ?? "contract"}">${ICON_FUNNEL} Sort &amp; filter</button>` : ""}
+    ${on.length ? `<span>Showing ${shown} of ${total}</span>` : ""}
+    ${on.map(([k, f]) => `<span class="fchip"><button type="button" data-fmenu="${k}" title="Change this filter"><b>${esc(COLS.find((c) => c.key === k).label)}:</b> ${filterSummary(f)}</button><button type="button" data-fclear="${k}" aria-label="Remove the ${esc(COLS.find((c) => c.key === k).label)} filter">×</button></span>`).join("")}
+    ${on.length > 1 ? `<button type="button" class="linklike" data-act="clear-filters">Clear all</button>` : ""}
+  </div>`;
+}
+
+// The column menu: sort, then a searchable list of values to tick (Excel's AutoFilter).
+// On a computer it drops down from the header; on a phone it's a sheet with a column picker.
+let fmenuRoot = null;
+function fmenuHtml() {
+  const key = S.fmenu.key, col = COLS.find((c) => c.key === key), f = S.colFilters[key], mobile = mobileQuery.matches;
+  const [asc, desc] = col.kind === "date" || col.kind === "reply" ? ["Oldest first", "Newest first"]
+    : col.kind === "start" ? ["Soonest first", "Latest first"] : key === "status" || key === "contract" ? ["In order", "Reverse"] : ["A → Z", "Z → A"];
+  const sorted = (d) => S.sort.key === key && S.sort.dir === d;
+  let body;
+  if (key === "description") {
+    body = `<label class="field"><span>Description contains</span><input type="search" id="fmenu-has" value="${esc(f?.has ?? "")}" placeholder="e.g. hydrogen" enterkeyhint="done"></label>`;
+  } else {
+    const counts = new Map();
+    for (const a of sheetRows(key)) { const v = fval(a, key); counts.set(v, (counts.get(v) ?? 0) + 1); }
+    for (const v of f?.in ?? []) if (!counts.has(v)) counts.set(v, 0);
+    const values = sortValues(key, [...counts.keys()]);
+    const ticked = (v) => !f?.in || f.in.includes(v);
+    body = `<input type="search" id="fmenu-q" placeholder="Search ${esc(col.label.toLowerCase())}" aria-label="Search the values" enterkeyhint="done">
+      <div class="fmenu-list" id="fmenu-list">
+        <label class="fmenu-all"><input type="checkbox" id="fmenu-all"><span>(Select all)</span></label>
+        ${values.map((v) => `<label data-v="${esc(fold(v || "(blanks)"))}"><input type="checkbox" value="${esc(v)}" ${ticked(v) ? "checked" : ""}><span>${v ? esc(v) : "<i>(Blanks)</i>"}</span><b>${counts.get(v)}</b></label>`).join("")}
+        ${values.length ? "" : `<p class="faint small" style="margin:6px 10px">No values in this column.</p>`}
+      </div>`;
+  }
+  return `${mobile ? `<div class="scrim" data-fcancel></div>` : ""}
+  <div class="fmenu ${mobile ? "sheet" : ""}" role="dialog" aria-label="Sort and filter: ${esc(col.label)}">
+    ${mobile ? `<label class="fmenu-col"><span>Column</span><select id="fmenu-col">${COLS.map((c) => `<option value="${c.key}" ${c.key === key ? "selected" : ""}>${c.label}${S.colFilters[c.key] ? " •" : ""}</option>`).join("")}</select></label>` : ""}
+    <div class="fmenu-sort"><button type="button" data-fsort="1" aria-pressed="${sorted(1)}">${asc}</button><button type="button" data-fsort="-1" aria-pressed="${sorted(-1)}">${desc}</button></div>
+    ${body}
+    <div class="fmenu-foot">${f ? `<button type="button" class="btn sm ghost" data-fclear-this>Clear filter</button>` : ""}<span class="spacer"></span>
+      <button type="button" class="btn sm" data-fcancel>Cancel</button><button type="button" class="btn sm primary" data-fok>OK</button></div>
+  </div>`;
+}
+function openFmenu(key, anchor) {
+  if (!fmenuRoot) {
+    fmenuRoot = Object.assign(document.createElement("div"), { id: "fmenu-root" });
+    document.body.append(fmenuRoot);
+    fmenuRoot.addEventListener("click", onFmenuClick);
+    fmenuRoot.addEventListener("input", onFmenuInput);
+    fmenuRoot.addEventListener("change", onFmenuChange);
+    fmenuRoot.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches("input[type=search]")) { e.preventDefault(); applyFmenu(); } });
+  }
+  S.fmenu = { key };
+  fmenuRoot.innerHTML = fmenuHtml();
+  syncSelectAll();
+  const menu = fmenuRoot.querySelector(".fmenu");
+  if (!mobileQuery.matches && anchor) {
+    const r = anchor.getBoundingClientRect();
+    const left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8));
+    let top = r.bottom + 4;
+    if (top + menu.offsetHeight > innerHeight - 8) top = Math.max(8, innerHeight - menu.offsetHeight - 8);
+    Object.assign(menu.style, { left: `${left}px`, top: `${top}px` });
+    menu.querySelector("#fmenu-q, #fmenu-has")?.focus();
+  }
+}
+function closeFmenu() {
+  S.fmenu = null;
+  if (fmenuRoot) fmenuRoot.innerHTML = "";
+}
+const fmenuBoxes = () => [...fmenuRoot.querySelectorAll(".fmenu-list label[data-v] input")];
+const visibleBoxes = () => fmenuBoxes().filter((b) => !b.closest("label").hidden);
+function syncSelectAll() {
+  const all = fmenuRoot.querySelector("#fmenu-all");
+  if (!all) return;
+  const vis = visibleBoxes(), n = vis.filter((b) => b.checked).length;
+  all.checked = vis.length > 0 && n === vis.length;
+  all.indeterminate = n > 0 && n < vis.length;
+  fmenuRoot.querySelector("[data-fok]").disabled = n === 0;
+}
+function onFmenuInput(e) {
+  if (e.target.id !== "fmenu-q") return;
+  // Like Excel: searching narrows the list and ticks what matches; OK keeps only those.
+  const q = fold(e.target.value.trim());
+  for (const b of fmenuBoxes()) {
+    const label = b.closest("label");
+    label.hidden = !!q && !label.dataset.v.includes(q);
+    if (q) b.checked = !label.hidden;
+  }
+  syncSelectAll();
+}
+function onFmenuChange(e) {
+  if (e.target.id === "fmenu-col") return openFmenu(e.target.value);
+  if (e.target.id === "fmenu-all") visibleBoxes().forEach((b) => { b.checked = e.target.checked; });
+  syncSelectAll();
+}
+function onFmenuClick(e) {
+  e.stopPropagation(); // the page's own click handler never sees clicks inside the menu
+  const t = e.target.closest("[data-fcancel], [data-fok], [data-fsort], [data-fclear-this]");
+  if (!t) return;
+  const key = S.fmenu?.key;
+  if (t.dataset.fsort) {
+    S.sort = { key, dir: Number(t.dataset.fsort) };
+    closeFmenu();
+    return render();
+  }
+  if (t.hasAttribute("data-fok")) return applyFmenu();
+  if (t.hasAttribute("data-fclear-this")) { setFilter(key, null); closeFmenu(); return render(); }
+  closeFmenu();
+}
+function applyFmenu() {
+  const key = S.fmenu?.key;
+  if (!key) return;
+  if (key === "description") {
+    const t = fmenuRoot.querySelector("#fmenu-has").value.trim();
+    setFilter(key, t ? { has: t } : null);
+  } else {
+    const searching = !!fmenuRoot.querySelector("#fmenu-q")?.value.trim();
+    const boxes = fmenuBoxes(), chosen = (searching ? visibleBoxes() : boxes).filter((b) => b.checked).map((b) => b.value);
+    if (!chosen.length) return;
+    setFilter(key, !searching && chosen.length === boxes.length ? null : { in: chosen });
+  }
+  closeFmenu();
+  render();
+}
+addEventListener("resize", () => { if (S.fmenu && !mobileQuery.matches) closeFmenu(); });
 
 // ── pieces shared by the table and the cards ──
 const statusSelect = (a) => `<select class="status-pill tone-${rowTone(a)}" data-status-of="${a.id}" aria-label="Status">${
@@ -545,15 +762,16 @@ function ratios() {
     ${median === null ? "" : `<div class="hide-xs"><dt>typical reply</dt><dd>${median} d</dd></div>`}
   </dl>`;
 }
-// Where the season stands: a bar of statuses that doubles as the filter.
+// Where the season stands: a bar of statuses that doubles as a quick filter on the Status column.
+const onlyStatus = (label) => S.colFilters.status?.in?.length === 1 && S.colFilters.status.in[0] === label;
 function statusBar() {
   const A = seasonRows();
   if (!A.length) return "";
   const groups = STATUSES.filter((x) => !x.legacy).map((x) => ({ ...x, n: A.filter((a) => a.status === x.id || (x.id === "applied" && a.status === "no_response") || (x.id === "skipped" && a.status === "withdrawn")).length })).filter((g) => g.n);
   return `<div class="mix" role="group" aria-label="Filter by status">
     <div class="mix-bar">${groups.map((g) => `<span class="tone-${g.tone}" style="flex:${g.n}"></span>`).join("")}</div>
-    <div class="mix-legend">${groups.map((g) => `<button data-filter="${g.id}" class="tone-${g.tone}" aria-pressed="${S.filter === g.id}"><i></i>${g.label}<b>${g.n}</b></button>`).join("")}
-      ${S.filter ? `<button data-filter="" class="clear">Show all</button>` : ""}</div>
+    <div class="mix-legend">${groups.map((g) => `<button data-filter="${g.id}" class="tone-${g.tone}" aria-pressed="${onlyStatus(g.label)}"><i></i>${g.label}<b>${g.n}</b></button>`).join("")}
+      ${S.colFilters.status ? `<button data-filter="" class="clear">Show all</button>` : ""}</div>
   </div>`;
 }
 function appsView() {
@@ -564,7 +782,8 @@ function appsView() {
   const mobile = mobileQuery.matches;
   const head = COLS.map((c) => {
     const on = S.sort.key === c.key;
-    return `<th class="h-${c.kind}" ${c.w ? `style="width:${c.w}px"` : ""} data-sort="${c.key}" title="${c.title ?? c.label}" aria-sort="${on ? (S.sort.dir > 0 ? "ascending" : "descending") : "none"}">${c.label}${on ? `<i class="arrow">${S.sort.dir > 0 ? "↑" : "↓"}</i>` : ""}</th>`;
+    const fOn = !!S.colFilters[c.key];
+    return `<th class="h-${c.kind}${fOn ? " filtered" : ""}" ${c.w ? `style="width:${c.w}px"` : ""} data-sort="${c.key}" title="${c.title ?? c.label}" aria-sort="${on ? (S.sort.dir > 0 ? "ascending" : "descending") : "none"}">${c.label}${on ? `<i class="arrow">${S.sort.dir > 0 ? "↑" : "↓"}</i>` : ""}<button type="button" class="fbtn${fOn ? " on" : ""}" data-fmenu="${c.key}" aria-label="Sort and filter ${c.label}${fOn ? " (filtered)" : ""}" title="Sort and filter">${fOn ? ICON_FUNNEL : ICON_CARET}</button></th>`;
   }).join("");
   const empty = seasonRows().length
     ? `<div class="empty">No rows match. <button class="btn sm" data-act="clear-filters">Show all</button></div>`
@@ -591,6 +810,7 @@ function appsView() {
       ${statusBar()}
       <input class="search" type="search" id="apps-q" placeholder="Search" value="${esc(S.appsQuery)}" aria-label="Search the log">
     </div>
+    ${filterBar()}
     ${mobile
       ? `<div class="cards" id="rows">${list.map(itemHtml).join("")}</div>${list.length ? "" : empty}`
       : `<div class="log-scroll" id="log-scroll">
@@ -600,7 +820,7 @@ function appsView() {
           </table>
           ${list.length ? "" : empty}
         </div>
-        <p class="faint small log-foot">Click a cell to edit it. Dates fill themselves when the status moves on; click one to change it. The row number opens notes, contacts and history.${S.sort.key ? ` <button class="linklike" data-act="clear-sort">Back to newest first</button>` : ""}</p>`}
+        <p class="faint small log-foot">Click a cell to edit it. The ▾ next to a column name sorts and filters it, like Excel. Dates fill themselves when the status moves on; click one to change it. The row number opens notes, contacts and history.${S.sort.key ? ` <button class="linklike" data-act="clear-sort">Back to newest first</button>` : ""}</p>`}
     <datalist id="contracts">${CONTRACT_SUGGESTIONS.map((c) => `<option value="${c}">`).join("")}</datalist>`;
 }
 
@@ -618,6 +838,8 @@ function refreshRow(id) {
 function refreshSummary() {
   const r = $(".ratios");
   if (r) r.outerHTML = ratios();
+  const fb = $("#fbar");
+  if (fb) fb.outerHTML = filterBar();
   const m = $(".mix");
   if (m) m.outerHTML = statusBar();
 }
@@ -717,7 +939,6 @@ async function startSeason() {
   }
   S.settings.current_season = next;
   S.season = null;
-  S.filter = null;
   render();
   toast(`Season ${next} started`);
 }
@@ -813,8 +1034,8 @@ async function addFromLink(raw, mode = "later") {
   S.apps.push(data);
   S.sort = { key: null, dir: 1 };
   S.season = null;
-  S.filter = null;
   S.appsQuery = "";
+  if (!sheetRows().includes(data)) { clearFilters(); toast("Filters cleared so the new row shows."); }
   render();
   focusRow(data.id, note && !mobileQuery.matches ? "company" : null);
   if (note && mobileQuery.matches) openApp(data.id);
@@ -835,8 +1056,9 @@ async function addTypedRow(company, mode) {
   S.apps.push(data);
   S.sort = { key: null, dir: 1 };
   S.season = null;
-  S.filter = null;
+  S.appsQuery = "";
   S.pendingLink = null;
+  if (!sheetRows().includes(data)) clearFilters();
   if (mobileQuery.matches) { render(); return openApp(data.id); }
   render();
   focusRow(data.id, "role");
@@ -1203,6 +1425,8 @@ function bindView() {
   if (qApps) qApps.addEventListener("input", () => {
     S.appsQuery = qApps.value;
     $("#rows").innerHTML = sheetRows().map(itemHtml).join("");
+    const fb = $("#fbar");
+    if (fb) fb.outerHTML = filterBar();
   });
   if (S.pendingLink) $("#link-input")?.focus();
   const linkForm = $("#link-form");
@@ -1249,7 +1473,6 @@ document.addEventListener("change", (e) => {
     const n = Number(e.target.value);
     S.season = n === currentSeason() ? null : n;
     S.appsQuery = "";
-    S.filter = null;
     render();
   }
 });
@@ -1281,12 +1504,21 @@ document.addEventListener("click", async (e) => {
   const dateBtnEl = e.target.closest("button[data-date]");
   if (dateBtnEl) return editDate(dateBtnEl);
   if (e.target.closest("[data-edit-link]")) return editLink(e.target.closest("td"));
-  const el = e.target.closest("[data-act], [data-inbox-tab], [data-open], [data-filter], [data-sort], [data-chip-remove], .post[data-i]");
+  if (e.target.closest("#fmenu-root")) return;
+  if (S.fmenu && !e.target.closest("[data-fmenu]")) return closeFmenu(); // a click outside just closes the menu, like Excel
+  const el = e.target.closest("[data-act], [data-inbox-tab], [data-inbox-kind], [data-open], [data-filter], [data-fmenu], [data-fclear], [data-sort], [data-chip-remove], .post[data-i]");
   if (!el) return;
+  if (el.dataset.fmenu) {
+    const k = el.dataset.fmenu;
+    return S.fmenu?.key === k ? closeFmenu() : openFmenu(k, el.closest("th") ?? el);
+  }
+  if (el.dataset.fclear) { setFilter(el.dataset.fclear, null); return render(); }
   if (el.dataset.filter !== undefined) {
-    S.filter = el.dataset.filter && S.filter !== el.dataset.filter ? el.dataset.filter : null;
+    const label = el.dataset.filter ? STATUS[el.dataset.filter].label : null;
+    setFilter("status", label && !onlyStatus(label) ? { in: [label] } : null);
     return render();
   }
+  if (el.dataset.inboxKind !== undefined) { S.inboxKind = el.dataset.inboxKind; S.cursor = 0; await loadInbox(); return render(); }
   if (el.dataset.chipRemove) {
     const k = el.dataset.chipRemove;
     S.settings[k] = S.settings[k].filter((_, i) => i !== Number(el.dataset.i));
@@ -1335,7 +1567,7 @@ document.addEventListener("click", async (e) => {
     case "delete-company": return deleteCompany();
     case "save-detected": return saveDetected();
     case "clear-sort": S.sort = { key: null, dir: 1 }; return render();
-    case "clear-filters": S.filter = null; S.appsQuery = ""; return render();
+    case "clear-filters": clearFilters(); S.appsQuery = ""; return render();
     case "paste": return pasteLink();
     case "save-app": return saveApp();
     case "delete-app": return deleteApp();
@@ -1347,6 +1579,7 @@ document.addEventListener("click", async (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && S.fmenu) return closeFmenu();
   if (e.key === "Escape" && S.drawer) { S.drawer = null; return render(); }
   if (S.view !== "inbox" || S.drawer || e.target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
   const p = S.inbox[S.cursor];

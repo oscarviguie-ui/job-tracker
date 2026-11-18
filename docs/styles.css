@@ -529,3 +529,67 @@ div.pending-row { padding: 14px 16px; border: 1px dashed var(--line); border-rad
 .card-main { grid-template-columns: auto minmax(0, 1fr); column-gap: 11px; align-items: start; }
 .card-main > .logo { margin-top: 1px; }
 .card-text { display: grid; gap: 1px; min-width: 0; }
+
+/* ── column filters (Excel's AutoFilter) ── */
+.log thead th:not(.gutter) { padding-right: 26px; }
+.log thead th.filtered { color: var(--ink); }
+.fbtn {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 20px; height: 22px; padding: 0;
+  display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--faint);
+  cursor: pointer; opacity: .6;
+}
+.log thead th:hover .fbtn, .fbtn:focus-visible, .fbtn.on { opacity: 1; }
+.fbtn:hover { background: var(--sunk); color: var(--ink); }
+.fbtn.on { color: var(--focus); background: color-mix(in oklab, var(--focus) 14%, transparent); }
+.fmenu {
+  position: fixed; z-index: 60; width: 280px; display: grid; gap: 8px; padding: 10px; font-size: 13.5px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); box-shadow: var(--shadow);
+}
+.fmenu.sheet {
+  left: 0; right: 0; bottom: 0; width: auto; max-height: 85dvh; border-radius: 14px 14px 0 0;
+  padding: 14px 14px calc(14px + env(safe-area-inset-bottom)); animation: rise .18s ease-out;
+}
+@keyframes rise { from { transform: translateY(24px); opacity: 0; } }
+.fmenu-col { display: flex; align-items: center; gap: 10px; font-weight: 650; }
+.fmenu-col select { flex: 1; }
+.fmenu-sort { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.fmenu-sort button {
+  height: 30px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--surface);
+  color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.fmenu-sort button:hover { color: var(--ink); border-color: var(--faint); }
+.fmenu-sort button[aria-pressed="true"] { background: var(--sunk); color: var(--ink); }
+.fmenu input[type=search] { height: 32px; }
+.fmenu-list { max-height: 270px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-s); padding: 3px 0; }
+.fmenu.sheet .fmenu-list { max-height: 44dvh; }
+.fmenu-list label { display: flex; align-items: center; gap: 8px; padding: 4px 10px; cursor: pointer; }
+.fmenu-list label[hidden] { display: none; }
+.fmenu-list label:hover { background: var(--sunk); }
+.fmenu-list input { width: 15px; height: 15px; margin: 0; flex: none; accent-color: var(--grid); }
+.fmenu-list span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fmenu-list i { color: var(--muted); }
+.fmenu-list b { font-weight: 500; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.fmenu-all { border-bottom: 1px solid var(--line); margin-bottom: 3px; padding-bottom: 6px !important; }
+.fmenu-foot { display: flex; align-items: center; gap: 6px; }
+.fmenu-foot .spacer { flex: 1; }
+.fmenu.sheet .fmenu-list label { padding: 8px 10px; }
+.fmenu.sheet .btn.sm { height: 36px; padding: 0 14px; font-size: 14px; }
+.fbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: -2px 0 10px; font-size: 13px; color: var(--muted); }
+.fbar[hidden] { display: none; }
+.fchip {
+  display: inline-flex; align-items: center; max-width: 100%; border-radius: 999px; overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--focus) 35%, var(--line)); background: color-mix(in oklab, var(--focus) 8%, var(--surface));
+}
+.fchip button { border: 0; background: none; cursor: pointer; padding: 3px 4px 3px 10px; font-size: 12.5px; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fchip button b { font-weight: 650; }
+.fchip button + button { padding: 3px 10px 3px 4px; color: var(--muted); flex: none; }
+.fchip button + button:hover { color: var(--danger); }
+
+/* inbox: posting types */
+.tag.kind-graduate { background: color-mix(in oklab, var(--s-offer) 18%, var(--surface)); color: color-mix(in oklab, var(--s-offer) 70%, var(--ink)); }
+.tag.kind-internship { background: color-mix(in oklab, var(--s-applied) 16%, var(--surface)); color: color-mix(in oklab, var(--s-applied) 65%, var(--ink)); }
+.tag.kind-vie { background: color-mix(in oklab, var(--s-accepted) 16%, var(--surface)); color: color-mix(in oklab, var(--s-accepted) 65%, var(--ink)); }
+@media (max-width: 760px) {
+  .toolbar .seg { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .toolbar .seg button { white-space: nowrap; }
+}
