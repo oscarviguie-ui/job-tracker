@@ -37,8 +37,10 @@ const S = {
   inbox: [],             // postings for the current inbox tab
   inboxTab: "new",       // new | all | dismissed
   inboxQuery: "",
-  inboxCompany: "",
-  inboxKind: "",         // "" = every type, else graduate | internship | vie | job
+  inboxF: loadInboxFilters(),    // inbox filters, each a list of ticked values: { kinds, places, starts, posted, categories, companies }
+  inboxFacets: null,             // counts per value, from the database (each facet ignores its own filter)
+  inboxTotal: 0,                 // postings that pass the filters (the list shows the newest 300)
+  imenu: null,                   // the open inbox filter menu: { key }
   cursor: 0,
   appsQuery: "",
   sort: { key: null, dir: 1 },   // null = the log's own order (oldest row first, like the Excel)
@@ -48,7 +50,10 @@ const S = {
   season: null,                  // which round of applications the log shows; null = the current one
   drawer: null,          // { type: 'app'|'company', id|null }
   detect: null,          // detection preview in Companies
-  coCategory: "",        // Companies page: show one category
+  coSectors: [],                 // Companies page: sectors shown (none = all)
+  coShow: "all",                 // all | watched | paused | manual
+  coQuery: "",
+  coAdd: false,                  // the "add a company" form is open
   newCount: 0,
   brands: {},                    // company key → { domain, icon_url } from the brand function
 };
@@ -56,6 +61,7 @@ const S = {
 function localGet(k, d) { try { return localStorage.getItem("jt:" + k) ?? d; } catch { return d; } }
 function localSet(k, v) { try { localStorage.setItem("jt:" + k, v); } catch { /* private mode */ } }
 function loadColFilters() { try { return JSON.parse(localGet("colFilters", "{}")) ?? {}; } catch { return {}; } }
+function loadInboxFilters() { try { return JSON.parse(localGet("inboxF", "{}")) ?? {}; } catch { return {}; } }
 
 // ───────────────────────────── helpers ─────────────────────────────
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -110,28 +116,22 @@ async function loadCore() {
   S.newCount = n.count ?? 0;
 }
 async function loadInbox() {
-  // Newest postings first (boards without a posting date fall back to the day the ad was first seen),
-  // then by start date (soonest first, none last), then by type: graduate programmes, internships, VIE, jobs.
-  let q = sb.from("postings").select("*, companies(name)").order("posted_sort", { ascending: false }).order("kind_rank").order("score", { ascending: false }).limit(400);
-  if (S.inboxTab === "new") q = q.eq("state", "new").eq("matched", true).eq("is_open", true);
-  if (S.inboxTab === "all") q = q.eq("is_open", true);
-  if (S.inboxTab === "dismissed") q = q.eq("state", "dismissed");
-  if (S.inboxCompany) q = q.eq("company_id", S.inboxCompany);
-  if (S.inboxQuery) q = q.ilike("title", `%${S.inboxQuery}%`);
-  if (S.inboxKind) q = q.eq("kind", S.inboxKind);
-  const { data, error } = await q;
+  // Filtering and counting happen in the database (public.inbox), so "All open postings" stays quick with 14 000 ads.
+  // Order: newest posting date first (boards without one fall back to the day the ad was first seen), then soonest
+  // start, then type (graduate programmes, internships, VIE, jobs).
+  const { data, error } = await sb.rpc("inbox", { p: { tab: S.inboxTab, q: S.inboxQuery, ...S.inboxF } });
   if (error) throw error;
-  for (const p of data) {
-    // Start dates are read from the title ("Stage – Février 2027", "Graduate Programme (Sept 2027 intake)").
+  for (const p of data.rows) {
+    p.companies = { name: p.company };
+    // Until the ad has been read, a start date stated in the title still shows.
     const st = p.starts ? { text: p.starts, from: p.starts_on } : startFrom(p.title, null, p.posted_at ?? today());
     p._starts = st?.text ?? null;
     p._startsOn = st?.from ?? null;
   }
-  data.sort((a, b) => String(b.posted_sort ?? "").localeCompare(String(a.posted_sort ?? ""))
-    || String(a._startsOn ?? "9999").localeCompare(String(b._startsOn ?? "9999"))
-    || (a.kind_rank ?? 9) - (b.kind_rank ?? 9) || (b.score ?? 0) - (a.score ?? 0));
-  S.inbox = data;
-  S.cursor = Math.min(S.cursor, Math.max(0, data.length - 1));
+  S.inbox = data.rows;
+  S.inboxTotal = data.total;
+  S.inboxFacets = data.facets;
+  S.cursor = Math.min(S.cursor, Math.max(0, data.rows.length - 1));
 }
 async function refreshCount() {
   const { count } = await sb.from("postings").select("id", { count: "exact", head: true }).eq("state", "new").eq("matched", true).eq("is_open", true);
@@ -217,17 +217,17 @@ function bindAuth() {
 // ───────────────────────────── inbox ─────────────────────────────
 function inboxView() {
   const tabs = [["new", "New for you"], ["all", "All open postings"], ["dismissed", "Dismissed"]];
-  const rows = S.inbox;
-  const companyOpts = S.companies.map((c) => `<option value="${c.id}" ${String(c.id) === String(S.inboxCompany) ? "selected" : ""}>${esc(c.name)}</option>`).join("");
+  const rows = S.inbox, filtered = activeInboxFilters().length > 0;
   let body;
   if (!rows.length) {
     const active = S.companies.filter((c) => c.active && c.ats !== "unknown").length;
     body = `<div class="feed"><div class="empty">${
-      S.inboxTab === "new"
+      filtered ? `<h2>Nothing matches these filters</h2><p>Untick a few values, or clear the filters.</p><button class="btn" data-act="clear-inbox-filters">Clear filters</button>`
+      : S.inboxTab === "new"
         ? active
-          ? `<h2>You're up to date</h2><p>New postings that match your filters land here after each morning check. Last check: ${esc(relTime(lastRun()))}.</p><button class="btn" data-act="run-all">Check all companies now</button>`
+          ? `<h2>You're up to date</h2><p>New postings that match your keywords land here after each morning check. Last check: ${esc(relTime(lastRun()))}.</p><button class="btn" data-act="run-all">Check all companies now</button>`
           : `<h2>No companies to watch yet</h2><p>Add the careers pages you care about and they'll be checked every morning.</p><a class="btn primary" href="#companies">Add companies</a>`
-        : `<h2>Nothing here</h2><p>Try another company or clear the search.</p>`
+        : `<h2>Nothing here</h2><p>Try another search.</p>`
     }</div></div>`;
   } else {
     let lastDay = "";
@@ -236,26 +236,30 @@ function inboxView() {
       const head = dayKey !== lastDay ? `<div class="day-head">Posted ${esc(dayLabel(dayKey))}</div>` : "";
       lastDay = dayKey;
       return head + postingRow(p, i);
-    }).join("")}</div>`;
+    }).join("")}</div>
+    ${S.inboxTotal > rows.length ? `<p class="faint small feed-more">Showing the newest ${rows.length} of ${S.inboxTotal}. Narrow the filters to see the rest.</p>` : ""}`;
   }
+  const title = S.inboxTab === "new" ? `${S.newCount} new ${S.newCount === 1 ? "posting" : "postings"}` : S.inboxTab === "all" ? "All open postings" : "Dismissed";
   return `
     <div class="page-head">
       <div class="grow">
-        <h1>${S.inboxTab === "new" ? `${S.newCount} new ${S.newCount === 1 ? "posting" : "postings"}` : "Postings"}</h1>
-        <p class="sub">Matched against your keywords and locations, newest postings first, then by start date and type. Track the ones worth applying to; dismiss the rest.</p>
+        <h1>${title}</h1>
+        <p class="sub">${S.inboxTab === "new" ? "Postings from the companies you watch that match your keywords, newest first. Track the ones worth applying to; dismiss the rest." : S.inboxTab === "all" ? "Every open posting from the companies you watch, matching your keywords or not." : "Postings you dismissed. Restore one to put it back in New."}</p>
       </div>
-      ${S.inboxTab === "new" && rows.length ? `<button class="btn" data-act="dismiss-visible">Dismiss all ${rows.length}</button>` : ""}
+      ${S.inboxTab === "new" && rows.length ? `<button class="btn" data-act="dismiss-visible">Dismiss ${filtered ? "these" : "all"} ${rows.length}</button>` : ""}
     </div>
     <div class="toolbar">
       <div class="seg" role="group" aria-label="Which postings">${tabs.map(([id, l]) => `<button data-inbox-tab="${id}" aria-pressed="${S.inboxTab === id}">${l}</button>`).join("")}</div>
-      <input class="search" type="search" id="inbox-q" placeholder="Search titles" value="${esc(S.inboxQuery)}">
-      <select id="inbox-co" style="width:auto"><option value="">All companies</option>${companyOpts}</select>
-      <div class="seg" role="group" aria-label="Type">${KINDS.map(([id, l]) => `<button data-inbox-kind="${id}" aria-pressed="${S.inboxKind === id}">${l}</button>`).join("")}</div>
-      <span class="faint small hide-m">Keys: j / k to move, t to track, d to dismiss, o to open</span>
+      <input class="search" type="search" id="inbox-q" placeholder="Search titles and companies" value="${esc(S.inboxQuery)}">
+      <span class="faint small hide-m">Keys: j / k to move, o to open, t to track, d to dismiss</span>
+    </div>
+    <div class="ifilters" role="group" aria-label="Filters">
+      ${IDIMS.map((d) => inboxChip(d)).join("")}
+      ${filtered ? `<span class="ifilters-count">${S.inboxTotal} ${S.inboxTotal === 1 ? "posting" : "postings"}</span><button type="button" class="linklike" data-act="clear-inbox-filters">Clear filters</button>` : ""}
     </div>
     ${body}`;
 }
-const KINDS = [["", "All types"], ["graduate", "Graduate programmes"], ["internship", "Internships"], ["vie", "VIE"], ["job", "Jobs"]];
+const KINDS = [["graduate", "Graduate programme"], ["internship", "Internship"], ["vie", "VIE"], ["apprenticeship", "Apprenticeship"], ["job", "Job"]];
 const KIND_LABEL = { graduate: "Graduate programme", internship: "Internship", vie: "VIE", apprenticeship: "Apprenticeship" };
 const KIND_CONTRACT = { graduate: "Graduate Program", internship: "Stage", vie: "VIE", apprenticeship: "Alternance" };
 function dayLabel(d) {
@@ -268,35 +272,246 @@ function dayLabel(d) {
 function lastRun() {
   return S.companies.map((c) => c.last_run_at).filter(Boolean).sort().at(-1);
 }
+const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
 function postingRow(p, i) {
   const tracked = p.state === "tracked";
+  const flag = p._starts ? windowFlag(readStart(p._starts)) : null;
   return `<div class="post ${i === S.cursor ? "active" : ""}" data-i="${i}" data-posting="${p.id}">
-    <div>
+    <div class="post-body">
       <a class="post-title" href="${safeUrl(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>
       <div class="post-meta">
         <span class="company">${logoHtml(p.companies?.name, "sm")}${esc(p.companies?.name)}</span>
         ${KIND_LABEL[p.kind] ? `<span class="tag kind-${esc(p.kind)}">${KIND_LABEL[p.kind]}</span>` : ""}
         ${p.location ? `<span>${esc(p.location)}</span>` : ""}
-        ${p._starts ? `<span>Starts ${esc(p._starts)}</span>` : ""}
-        ${p.posted_at ? `<span>Posted ${esc(fmtDate(p.posted_at))}</span>` : `<span title="This board doesn't publish posting dates">First seen ${esc(fmtDate(p.first_seen))}</span>`}
+        ${p._starts ? `<span class="p-start${flag ? ` start-${flag.kind}` : ""}"${flag ? ` title="${esc(flag.why)}"` : ""}>Starts ${esc(p._starts)}</span>` : ""}
+        ${p.posted_at ? `<span>Posted ${esc(postedAgo(p.posted_at))}</span>` : `<span title="This board doesn't publish posting dates">First seen ${esc(postedAgo(String(p.first_seen).slice(0, 10)))}</span>`}
         ${!p.baseline && S.inboxTab === "new" ? `<span class="tag new">New listing</span>` : ""}
         ${!p.is_open ? `<span class="tag closed">Closed</span>` : ""}
-        ${!p.matched && S.inboxTab !== "new" ? `<span class="tag">Outside your filters</span>` : ""}
+        ${!p.matched && S.inboxTab !== "new" ? `<span class="tag">Outside your keywords</span>` : ""}
       </div>
+      ${p.summary ? `<p class="post-summary">${esc(p.summary)}</p>` : ""}
     </div>
     <div class="post-actions">
+      ${p.url ? `<a class="btn sm" href="${safeUrl(p.url)}" target="_blank" rel="noopener" title="${esc(p.url)}">${ICON_OPEN}<span>Open ad</span><span class="post-host">${esc(hostOf(p.url))}</span></a>` : ""}
       ${tracked ? `<span class="tag">Tracked</span>` : `<button class="btn sm primary" data-act="track" data-id="${p.id}">Track <kbd>t</kbd></button>`}
       ${p.state === "new" ? `<button class="btn sm" data-act="dismiss" data-id="${p.id}">Dismiss <kbd>d</kbd></button>` : ""}
       ${p.state === "dismissed" ? `<button class="btn sm" data-act="restore" data-id="${p.id}">Restore</button>` : ""}
     </div>
   </div>`;
 }
+
+// ── inbox filters: one multi-select menu per dimension, with counts from the database ──
+const IDIMS = [
+  { key: "places", label: "Where", search: true },
+  { key: "starts", label: "Starts" },
+  { key: "posted", label: "Posted" },
+  { key: "kinds", label: "Type" },
+  { key: "categories", label: "Sector" },
+  { key: "companies", label: "Company", search: true },
+];
+const POSTED = [["today", "Today"], ["yesterday", "Yesterday"], ["week", "2–6 days ago"], ["lastweek", "1–2 weeks ago"], ["month", "2–4 weeks ago"], ["older", "Over a month ago"]];
+const PLACE_LAST = ["Several places", "Remote", "Other", ""];
+const placeLabel = (c) => (c === "" ? "Not stated" : c === "Other" ? "Elsewhere" : c);
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const monthKeyLabel = (k) => `${MONTHS_SHORT[+k.slice(5, 7) - 1]} ${k.slice(0, 4)}`;
+const activeInboxFilters = () => IDIMS.filter((d) => S.inboxF[d.key]?.length);
+// Every value a menu can show: [{ v, label, n, region? }], in display order. Ticked values with no postings stay listed.
+function inboxOptions(key) {
+  const f = S.inboxFacets ?? {}, ticked = S.inboxF[key] ?? [];
+  let opts = [];
+  if (key === "kinds") opts = KINDS.map(([v, label]) => ({ v, label, n: f.kinds?.[v] ?? 0 }));
+  if (key === "posted") opts = POSTED.map(([v, label]) => ({ v, label, n: f.posted?.[v] ?? 0 }));
+  if (key === "starts") {
+    const months = Object.keys(f.starts ?? {}).concat(ticked).filter((k) => /^\d{4}-\d{2}$/.test(k));
+    opts = [{ v: "asap", label: "ASAP", n: f.starts?.asap ?? 0 },
+      ...[...new Set(months)].sort().map((v) => ({ v, label: monthKeyLabel(v), n: f.starts?.[v] ?? 0 })),
+      { v: "none", label: "Not stated", n: f.starts?.none ?? 0 }];
+  }
+  if (key === "categories") {
+    const cats = [...new Set([...CATEGORIES, ...Object.keys(f.categories ?? {}), ...ticked])];
+    opts = cats.map((v) => ({ v, label: v || "No sector", n: f.categories?.[v] ?? 0 }));
+  }
+  if (key === "companies") {
+    const name = (id) => S.companies.find((c) => String(c.id) === String(id))?.name ?? `#${id}`;
+    const ids = [...new Set([...Object.keys(f.companies ?? {}), ...ticked.map(String)])];
+    opts = ids.map((v) => ({ v, label: name(v), n: f.companies?.[v] ?? 0 })).sort((a, b) => a.label.localeCompare(b.label, "fr", { sensitivity: "base" }));
+  }
+  if (key === "places") {
+    // Countries, each followed by its regions (France: Paris area / elsewhere; Canada: provinces; UK: London / elsewhere).
+    const byCountry = new Map();
+    for (const [c, r, n] of f.places ?? []) {
+      const e = byCountry.get(c) ?? { n: 0, regions: new Map() };
+      e.n += n;
+      if (r) e.regions.set(r, (e.regions.get(r) ?? 0) + n);
+      byCountry.set(c, e);
+    }
+    for (const t of ticked) {
+      const [c, r] = t.split("|");
+      const e = byCountry.get(c) ?? { n: 0, regions: new Map() };
+      if (r && !e.regions.has(r)) e.regions.set(r, 0);
+      byCountry.set(c, e);
+    }
+    const rank = (c) => (PLACE_LAST.includes(c) ? 1 : 0);
+    for (const [c, e] of [...byCountry].sort((a, b) => rank(a[0]) - rank(b[0]) || b[1].n - a[1].n || a[0].localeCompare(b[0]))) {
+      opts.push({ v: c, label: placeLabel(c), n: e.n, country: true, hasRegions: e.regions.size > 0 });
+      for (const [r, n] of [...e.regions].sort((a, b) => b[1] - a[1])) opts.push({ v: `${c}|${r}`, label: r, n, region: c });
+    }
+  }
+  return opts.filter((o) => o.n > 0 || ticked.includes(o.v) || (o.country && ticked.some((t) => t.startsWith(o.v + "|"))));
+}
+function inboxSummary(key) {
+  const vals = S.inboxF[key] ?? [];
+  const opts = inboxOptions(key), label = (v) => opts.find((o) => o.v === v)?.label ?? v;
+  const names = vals.map((v) => (key === "places" && v.includes("|") ? v.split("|")[1] : label(v)));
+  return names.length <= 2 ? names.join(", ") : `${names.length} selected`;
+}
+function inboxChip(d) {
+  const on = S.inboxF[d.key]?.length;
+  return `<button type="button" class="ichip${on ? " on" : ""}${S.imenu?.key === d.key ? " open" : ""}" data-imenu="${d.key}" aria-haspopup="dialog">
+    <b>${d.label}</b>${on ? `<span>${esc(inboxSummary(d.key))}</span>` : ""}${ICON_CARET}</button>`;
+}
+
+let imenuRoot = null;
+function imenuHtml() {
+  const d = IDIMS.find((x) => x.key === S.imenu.key), mobile = mobileQuery.matches;
+  const ticked = S.inboxF[d.key], opts = inboxOptions(d.key);
+  // Nothing ticked means no filter: every box starts ticked, like Excel.
+  const isOn = (o) => !ticked?.length || ticked.includes(o.v) || (o.region && ticked.includes(o.region))
+    || (o.country && o.hasRegions && ticked.some((t) => t.startsWith(o.v + "|")) && opts.filter((x) => x.region === o.v).every((x) => ticked.includes(x.v)));
+  const st = S.settings ?? {};
+  const windowBtn = d.key === "starts" && (st.available_from || st.available_until)
+    ? `<button type="button" class="btn sm ghost" data-iwindow>Only my start window (${esc(windowLabel())})</button>` : "";
+  return `${mobile ? `<div class="scrim" data-icancel></div>` : ""}
+  <div class="fmenu imenu ${mobile ? "sheet" : ""}" role="dialog" aria-label="Filter: ${esc(d.label)}">
+    <div class="imenu-head"><b>${esc(d.label)}</b>${windowBtn}</div>
+    ${d.search || opts.length > 9 ? `<input type="search" id="imenu-q" placeholder="Search" aria-label="Search the values" enterkeyhint="done">` : ""}
+    <div class="fmenu-list" id="imenu-list">
+      <label class="fmenu-all"><input type="checkbox" id="imenu-all"><span>(Select all)</span></label>
+      ${opts.map((o) => `<label data-v="${esc(fold(o.label + " " + (o.region ?? "")))}" class="${o.region ? "sub" : o.country && o.hasRegions ? "parent" : ""}" ${o.region ? `data-parent="${esc(o.region)}"` : ""}>
+        <input type="checkbox" value="${esc(o.v)}" ${o.country && o.hasRegions ? "data-country" : ""} ${isOn(o) ? "checked" : ""}><span>${esc(o.label)}</span><b>${o.n}</b></label>`).join("")}
+      ${opts.length ? "" : `<p class="faint small" style="margin:6px 10px">No postings to filter.</p>`}
+    </div>
+    <div class="fmenu-foot">${ticked?.length ? `<button type="button" class="btn sm ghost" data-iclear>Clear</button>` : ""}<span class="spacer"></span>
+      <button type="button" class="btn sm" data-icancel>Cancel</button><button type="button" class="btn sm primary" data-iok>Apply</button></div>
+  </div>`;
+}
+function windowLabel() {
+  const st = S.settings ?? {};
+  const a = st.available_from ? monthName(st.available_from) : "", b = st.available_until ? monthName(st.available_until) : "";
+  return a && b ? `${a} – ${b}` : a ? `from ${a}` : `until ${b}`;
+}
+function openImenu(key, anchor) {
+  if (!imenuRoot) {
+    imenuRoot = Object.assign(document.createElement("div"), { id: "imenu-root" });
+    document.body.append(imenuRoot);
+    imenuRoot.addEventListener("click", onImenuClick);
+    imenuRoot.addEventListener("input", onImenuInput);
+    imenuRoot.addEventListener("change", onImenuChange);
+    imenuRoot.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches("input[type=search]")) { e.preventDefault(); applyImenu(); } });
+  }
+  S.imenu = { key };
+  imenuRoot.innerHTML = imenuHtml();
+  syncImenu();
+  document.querySelectorAll("[data-imenu]").forEach((b) => b.classList.toggle("open", b.dataset.imenu === key));
+  const menu = imenuRoot.querySelector(".fmenu");
+  if (!mobileQuery.matches && anchor) {
+    const r = anchor.getBoundingClientRect();
+    const left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8));
+    let top = r.bottom + 4;
+    if (top + menu.offsetHeight > innerHeight - 8) top = Math.max(8, innerHeight - menu.offsetHeight - 8);
+    Object.assign(menu.style, { left: `${left}px`, top: `${top}px` });
+    menu.querySelector("#imenu-q")?.focus();
+  }
+}
+function closeImenu() {
+  S.imenu = null;
+  if (imenuRoot) imenuRoot.innerHTML = "";
+  document.querySelectorAll("[data-imenu].open").forEach((b) => b.classList.remove("open"));
+}
+const imenuBoxes = () => [...imenuRoot.querySelectorAll("#imenu-list label[data-v] input")];
+function syncImenu() {
+  // A country's box follows its regions: ticked when all are, half-ticked when some are.
+  for (const c of imenuRoot.querySelectorAll("input[data-country]")) {
+    const subs = imenuBoxes().filter((b) => b.closest("label").dataset.parent === c.value);
+    const n = subs.filter((b) => b.checked).length;
+    c.checked = n === subs.length;
+    c.indeterminate = n > 0 && n < subs.length;
+  }
+  const all = imenuRoot.querySelector("#imenu-all"), vis = imenuBoxes().filter((b) => !b.closest("label").hidden);
+  const n = vis.filter((b) => b.checked).length;
+  all.checked = vis.length > 0 && n === vis.length;
+  all.indeterminate = n > 0 && n < vis.length;
+  imenuRoot.querySelector("[data-iok]").disabled = n === 0;
+}
+function onImenuInput(e) {
+  if (e.target.id !== "imenu-q") return;
+  const q = fold(e.target.value.trim());
+  for (const b of imenuBoxes()) {
+    const label = b.closest("label");
+    label.hidden = !!q && !label.dataset.v.includes(q);
+    if (q) b.checked = !label.hidden;
+  }
+  syncImenu();
+}
+function onImenuChange(e) {
+  const t = e.target;
+  if (t.id === "imenu-all") imenuBoxes().filter((b) => !b.closest("label").hidden).forEach((b) => { b.checked = t.checked; });
+  else if (t.dataset.country !== undefined) imenuBoxes().filter((b) => b.closest("label").dataset.parent === t.value).forEach((b) => { b.checked = t.checked; });
+  syncImenu();
+}
+function onImenuClick(e) {
+  e.stopPropagation();
+  const t = e.target.closest("[data-icancel], [data-iok], [data-iclear], [data-iwindow]");
+  if (!t) return;
+  if (t.hasAttribute("data-iok")) return applyImenu();
+  if (t.hasAttribute("data-iclear")) return setInboxFilter(S.imenu.key, null);
+  if (t.hasAttribute("data-iwindow")) {
+    // Months inside the window from Settings, and ASAP when today is inside it.
+    const st = S.settings ?? {}, from = (st.available_from ?? "0000-00").slice(0, 7), until = (st.available_until ?? "9999-99").slice(0, 7);
+    for (const b of imenuBoxes()) b.checked = b.value === "asap" ? today().slice(0, 7) >= from && today().slice(0, 7) <= until : /^\d{4}-\d{2}$/.test(b.value) && b.value >= from && b.value <= until;
+    return syncImenu();
+  }
+  closeImenu();
+}
+function applyImenu() {
+  const key = S.imenu?.key;
+  if (!key) return;
+  const boxes = imenuBoxes().filter((b) => b.dataset.country === undefined || !imenuBoxes().some((x) => x.closest("label").dataset.parent === b.value));
+  const searching = !!imenuRoot.querySelector("#imenu-q")?.value.trim();
+  const chosen = boxes.filter((b) => b.checked && (!searching || !b.closest("label").hidden)).map((b) => b.value);
+  if (!chosen.length) return;
+  // Everything ticked is no filter. A country whose regions are all ticked is sent as the country.
+  if (!searching && chosen.length === boxes.length) return setInboxFilter(key, null);
+  let vals = chosen;
+  if (key === "places") {
+    const countries = new Set(imenuBoxes().filter((b) => b.dataset.country !== undefined).map((b) => b.value));
+    vals = [];
+    for (const c of countries) {
+      const subs = imenuBoxes().filter((b) => b.closest("label").dataset.parent === c);
+      if (subs.length && subs.every((b) => chosen.includes(b.value))) vals.push(c);
+      else vals.push(...subs.filter((b) => chosen.includes(b.value)).map((b) => b.value));
+    }
+    vals.push(...chosen.filter((v) => !v.includes("|") && !countries.has(v)));
+  }
+  setInboxFilter(key, vals);
+}
+async function setInboxFilter(key, vals) {
+  closeImenu();
+  if (vals?.length) S.inboxF[key] = vals; else delete S.inboxF[key];
+  localSet("inboxF", JSON.stringify(S.inboxF));
+  S.cursor = 0;
+  try { await loadInbox(); } catch (err) { return fail(err, "Couldn't filter"); }
+  render();
+}
+addEventListener("resize", () => { if (S.imenu && !mobileQuery.matches) closeImenu(); });
+
 async function trackPosting(id) {
   const p = S.inbox.find((x) => x.id === id);
   if (!p) return;
   const { data, error } = await sb.from("applications").insert({
     season: currentSeason(), status: "saved", company: p.companies?.name ?? "", company_id: p.company_id, posting_id: p.id, role: p.title,
     location: p.location, url: p.url, date_posted: p.posted_at, contract: KIND_CONTRACT[p.kind] ?? guessContract(p.title), starts: p._starts ?? null,
+    description: p.summary ?? null,
   }).select().single();
   if (error) return fail(error, "Couldn't track it");
   await sb.from("postings").update({ state: "tracked", application_id: data.id }).eq("id", id);
@@ -449,8 +664,13 @@ const startDay = (a) => readStart(a.starts)?.from ?? null;
 // Flag rows you could still act on whose start falls outside the window set in Settings. A range or an either/or
 // ("Jan–Mar", "Dec or Feb") is only flagged when none of it fits.
 function startFlag(a) {
-  const s = S.settings ?? {}, st = readStart(a.starts);
-  if (!st || !["saved", "applied", "interview", "offer"].includes(a.status) || (a.season ?? 2) !== currentSeason()) return null;
+  if (!["saved", "applied", "interview", "offer"].includes(a.status) || (a.season ?? 2) !== currentSeason()) return null;
+  return windowFlag(readStart(a.starts));
+}
+// Outside the months set in Settings → When you can start (used by the log and the inbox).
+function windowFlag(st) {
+  const s = S.settings ?? {};
+  if (!st) return null;
   if (s.available_from && st.to.slice(0, 7) < s.available_from.slice(0, 7)) return { kind: "early", why: `Starts before ${monthName(s.available_from)}, the earliest you can start` };
   if (s.available_until && st.from.slice(0, 7) > s.available_until.slice(0, 7)) return { kind: "late", why: `Starts after ${monthName(s.available_until)}, the latest start that works for you` };
   return null;
@@ -1090,49 +1310,75 @@ function companyHealth(c) {
 const CATEGORIES = ["Oil & gas major", "Utility & grid", "Trading house", "Engineering & equipment", "Bank", "Infrastructure & pension fund",
   "Development bank", "Agency & regulator", "Market data & research", "Consulting"];
 function companiesView() {
-  const d = S.detect;
-  const watched = S.companies.filter((c) => c.active && c.ats !== "unknown").length;
-  const cats = [...new Set([...CATEGORIES, ...S.companies.map((c) => c.category).filter(Boolean)])];
-  const catRank = (c) => { const i = cats.indexOf(c.category); return i < 0 ? 99 : i; };
-  const list = S.companies.filter((c) => !S.coCategory || (c.category ?? "") === (S.coCategory === "-" ? "" : S.coCategory))
-    .sort((a, b) => catRank(a) - catRank(b) || a.name.localeCompare(b.name, "fr", { sensitivity: "base" }));
-  let lastCat = null;
+  const d = S.detect, cos = S.companies, auto = (c) => c.ats !== "unknown";
+  const read = cos.filter((c) => c.active && auto(c)).length, manual = cos.filter((c) => c.active && !auto(c)).length;
+  const off = cos.filter((c) => !c.active).length;
+  const matches = cos.reduce((n, c) => n + (c.active ? c.matched_open ?? 0 : 0), 0);
+  const sectors = [...new Set([...CATEGORIES, ...cos.map((c) => c.category ?? "")])].filter((x) => cos.some((c) => (c.category ?? "") === x));
+  const q = fold(S.coQuery.trim());
+  const show = { all: () => true, watched: (c) => c.active, paused: (c) => !c.active, manual: (c) => !auto(c) };
+  const shown = cos.filter((c) => (!S.coSectors.length || S.coSectors.includes(c.category ?? "")) && show[S.coShow](c) && (!q || fold(c.name).includes(q)));
+  const seg = [["all", "All", cos.length], ["watched", "Watched", cos.length - off], ["paused", "Not watched", off], ["manual", "Checked by hand", cos.filter((c) => !auto(c)).length]];
+  const sectorOpts = (cur) => [...new Set([...CATEGORIES, ...sectors])].filter(Boolean)
+    .map((x) => `<option value="${esc(x)}" ${x === cur ? "selected" : ""}>${esc(x)}</option>`).join("") + `<option value="" ${!cur ? "selected" : ""}>No sector</option>`;
+  const groups = sectors.map((sec) => [sec, shown.filter((c) => (c.category ?? "") === sec).sort((x, y) => x.name.localeCompare(y.name, "fr", { sensitivity: "base" }))]).filter(([, l]) => l.length);
+  const row = (c) => `<tr class="${c.active ? "" : "off"}">
+      <td class="w-check"><input type="checkbox" data-watch="${c.id}" ${c.active ? "checked" : ""} aria-label="Watch ${esc(c.name)}"></td>
+      <td class="co"><span class="co-cell">${logoHtml(c.name, "sm")}${c.careers_url ? `<a href="${safeUrl(c.careers_url)}" target="_blank" rel="noopener" title="Open the careers page">${esc(c.name)}</a>` : esc(c.name)}</span>
+        <span class="co-sub">${esc(c.category || "No sector")}${c.big ? " · Big" : ""} · ${companyHealth(c)}</span></td>
+      <td class="hide-m"><select class="co-sector" data-co-sector-of="${c.id}" aria-label="Sector of ${esc(c.name)}">${sectorOpts(c.category ?? "")}</select></td>
+      <td class="flag hide-m"><input type="checkbox" data-co-flag="big" data-id="${c.id}" ${c.big ? "checked" : ""} aria-label="${esc(c.name)} is a big company"></td>
+      <td class="flag hide-m"><input type="checkbox" data-co-flag="in_field" data-id="${c.id}" ${c.in_field ? "checked" : ""} aria-label="Every role at ${esc(c.name)} is in my field"></td>
+      <td class="hide-m">${c.ats === "unknown" ? `<span class="health manual">Can't be read automatically</span>` : `<span class="src">${esc(ATS_LABEL[c.ats] ?? c.ats)}</span> ${companyHealth(c)}`}</td>
+      <td class="num">${c.active && c.matched_open ? `<a href="#inbox" data-co-inbox="${c.id}" title="Show these postings in the inbox">${c.matched_open}</a>` : ""}</td>
+      <td class="hide-m muted small">${c.ats !== "unknown" ? esc(relTime(c.last_run_at)) : ""}</td>
+      <td class="row-actions-cell"><div class="row-actions">
+        ${c.ats !== "unknown" && c.active ? `<button class="btn sm ghost" data-act="run-one" data-id="${c.id}">Check now</button>` : ""}
+        <button class="btn sm ghost" data-act="edit-company" data-id="${c.id}">Edit</button>
+      </div></td>
+    </tr>`;
   return `
     <div class="page-head">
-      <div class="grow"><h1>Companies</h1><p class="sub">${watched} of ${S.companies.length} careers pages are checked every morning at 06:30. Paste a careers page or any job link from a company to add it. “Check by hand” sites can't be read automatically: pasting one of their job links here usually finds the job board behind them.</p></div>
+      <div class="grow"><h1>Companies</h1><p class="sub">The careers pages the scraper reads every morning at 06:30. Untick a company to stop watching it, and its postings leave your inbox. A sector's tick box watches or drops the whole sector.</p></div>
       <button class="btn" data-act="run-all">Check all now</button>
+      <button class="btn ${S.coAdd || d ? "" : "primary"}" data-act="toggle-add">${S.coAdd || d ? "Close" : "Add a company"}</button>
     </div>
-    <form class="panel panel-pad" id="add-company" style="margin-bottom:22px">
+    <div class="co-stats">
+      <div><b>${read}</b><span>read automatically every morning</span></div>
+      <div><b>${manual}</b><span>watched, but their sites can't be read: open them by hand</span></div>
+      <div><b>${off}</b><span>not watched</span></div>
+      <div><b>${matches}</b><span>open postings match your keywords</span></div>
+    </div>
+    ${S.coAdd || d ? `<form class="panel panel-pad" id="add-company" style="margin-bottom:18px">
       <div class="add-company">
         <label class="field"><span>Company</span><input type="text" name="name" placeholder="e.g. Engie" required value="${esc(d?.name ?? "")}"></label>
         <label class="field"><span>Careers page or a job link</span><input type="url" name="url" placeholder="https://…" required value="${esc(d?.url ?? "")}"></label>
-        <button class="btn" type="submit" ${d?.loading ? "disabled" : ""}>${d?.loading ? "Checking…" : "Check"}</button>
+        <button class="btn primary" type="submit" ${d?.loading ? "disabled" : ""}>${d?.loading ? "Checking…" : "Check"}</button>
       </div>
+      <p class="faint small" style="margin:8px 0 0">Paste the careers page, or any job link from the company: the app finds the job board behind it and shows what it can read before adding it.</p>
       ${d && !d.loading ? detectResult(d) : ""}
-    </form>
+    </form>` : ""}
     <div class="toolbar">
-      <select id="co-cat" style="width:auto" aria-label="Category"><option value="">All categories (${S.companies.length})</option>${cats.map((c) => { const n = S.companies.filter((x) => x.category === c).length; return n ? `<option value="${esc(c)}" ${S.coCategory === c ? "selected" : ""}>${esc(c)} (${n})</option>` : ""; }).join("")}<option value="-" ${S.coCategory === "-" ? "selected" : ""}>No category</option></select>
-      <span class="faint small"><span class="tag big">Big</span> companies can show postings from your relocation cities too.</span>
+      <input class="search" type="search" id="co-q" placeholder="Search companies" value="${esc(S.coQuery)}">
+      <div class="seg" role="group" aria-label="Show">${seg.map(([k, l, n]) => `<button data-co-show="${k}" aria-pressed="${S.coShow === k}">${l} <span class="faint">${n}</span></button>`).join("")}</div>
     </div>
-    <div class="table-wrap"><table class="stack">
-      <thead><tr><th>Company</th><th class="hide-m">Source</th><th>Status</th><th class="num hide-m">Matches</th><th class="hide-m">Last checked</th><th></th></tr></thead>
-      <tbody>${list.map((c) => {
-        const head = !S.coCategory && (c.category ?? "") !== lastCat ? `<tr class="cat-head"><th colspan="6">${esc(c.category || "No category")}</th></tr>` : "";
-        lastCat = c.category ?? "";
-        return `${head}<tr>
-        <td class="co"><span class="co-cell">${logoHtml(c.name, "sm")}${c.careers_url ? `<a href="${safeUrl(c.careers_url)}" target="_blank" rel="noopener">${esc(c.name)}</a>` : esc(c.name)}${c.big ? ` <span class="tag big" title="Big company: postings in your relocation cities count too">Big</span>` : ""}</span></td>
-        <td class="hide-m"><span class="src">${esc(ATS_LABEL[c.ats] ?? c.ats)}</span>${c.country ? `<span class="faint small"> in ${esc(c.country)}</span>` : ""}${c.search ? `<span class="faint small"> for “${esc(c.search)}”</span>` : ""}</td>
-        <td class="status-cell">${companyHealth(c)}</td>
-        <td class="num hide-m">${c.matched_open ?? ""}</td>
-        <td class="hide-m muted small">${esc(relTime(c.last_run_at))}</td>
-        <td class="row-actions-cell"><div class="row-actions">
-          ${c.ats !== "unknown" && c.active ? `<button class="btn sm ghost" data-act="run-one" data-id="${c.id}">Check now</button>` : ""}
-          <button class="btn sm ghost" data-act="toggle-company" data-id="${c.id}">${c.active ? "Pause" : "Resume"}</button>
-          <button class="btn sm ghost" data-act="edit-company" data-id="${c.id}">Edit</button>
-        </div></td>
-      </tr>`;
-      }).join("")}</tbody>
-    </table>${S.companies.length ? "" : `<div class="empty">No companies yet.</div>`}</div>`;
+    <div class="ifilters" role="group" aria-label="Sectors">
+      ${sectors.map((x) => `<button type="button" class="ichip${S.coSectors.includes(x) ? " on" : ""}" data-co-sector="${esc(x)}" aria-pressed="${S.coSectors.includes(x)}"><b>${esc(x || "No sector")}</b><i>${cos.filter((c) => (c.category ?? "") === x).length}</i></button>`).join("")}
+      ${S.coSectors.length ? `<button type="button" class="linklike" data-act="co-all-sectors">All sectors</button>` : ""}
+    </div>
+    <div class="table-wrap"><table class="co-table">
+      <thead><tr><th class="w-check"><span class="sr">Watch</span></th><th>Company</th><th class="hide-m">Sector</th>
+        <th class="flag hide-m" title="Big company: postings in your relocation cities count too">Big</th>
+        <th class="flag hide-m" title="Every role here is in my field: only the level keywords, hidden words and locations apply">All roles</th>
+        <th class="hide-m">Source</th><th class="num" title="Open postings that match your keywords">Matches</th><th class="hide-m">Checked</th><th></th></tr></thead>
+      ${groups.map(([sec, list]) => {
+        const on = list.filter((c) => c.active).length;
+        return `<tbody>
+        <tr class="sec-head"><td class="w-check"><input type="checkbox" data-watch-sector="${esc(sec)}" data-ids="${list.map((c) => c.id).join(",")}" ${on === list.length ? "checked" : ""} data-some="${on > 0 && on < list.length}" aria-label="Watch every company in ${esc(sec || "No sector")}"></td>
+          <th colspan="8">${esc(sec || "No sector")} <span>${on} of ${list.length} watched</span></th></tr>
+        ${list.map(row).join("")}</tbody>`;
+      }).join("")}
+    </table>${shown.length ? "" : `<div class="empty">${cos.length ? "No company matches." : "No companies yet."}</div>`}</div>`;
 }
 function detectResult(d) {
   if (!d.ok) {
@@ -1163,9 +1409,25 @@ async function saveDetected() {
   S.companies.push(data);
   S.companies.sort((a, b) => a.name.localeCompare(b.name));
   S.detect = null;
+  S.coAdd = false;
   toast(`Added ${data.name}`);
   render();
   if (data.ats !== "unknown") runOne(data.id);
+}
+// Watching: the morning check reads only watched companies, and the inbox only shows their postings.
+async function setWatched(ids, active) {
+  await updateCompanies(ids, { active }, ids.length > 1 ? `${active ? "Watching" : "Stopped watching"} ${ids.length} companies` : null);
+  await refreshCount();
+  render();
+}
+async function updateCompanies(ids, patch, note, rematched = false) {
+  const { error } = await sb.from("companies").update(patch).in("id", ids);
+  if (error) { fail(error, "Couldn't save"); return render(); }
+  S.companies.forEach((c) => { if (ids.includes(c.id)) Object.assign(c, patch); });
+  // Big and "every role in my field" re-match the company's postings in the database; fetch the new counts.
+  if (rematched) { await Promise.all([loadMatchCounts(), refreshCount()]); }
+  if (note) toast(note);
+  render();
 }
 async function runOne(id) {
   const c = S.companies.find((x) => x.id === id);
@@ -1442,8 +1704,17 @@ function bindView() {
     let t;
     qInbox.addEventListener("input", () => { clearTimeout(t); t = setTimeout(async () => { S.inboxQuery = qInbox.value.trim(); await loadInbox(); render(); $("#inbox-q").focus(); }, 250); });
   }
-  $("#inbox-co")?.addEventListener("change", async (e) => { S.inboxCompany = e.target.value; await loadInbox(); render(); });
-  $("#co-cat")?.addEventListener("change", (e) => { S.coCategory = e.target.value; render(); });
+  const coQ = $("#co-q");
+  if (coQ) coQ.addEventListener("input", () => {
+    S.coQuery = coQ.value;
+    const at = coQ.selectionStart;
+    render();
+    const again = $("#co-q");
+    again.focus();
+    again.setSelectionRange(at, at);
+  });
+  // A sector heading's box is half-ticked when only some of its companies are watched.
+  document.querySelectorAll("[data-watch-sector]").forEach((b) => { b.indeterminate = b.dataset.some === "true"; });
   const qApps = $("#apps-q");
   if (qApps) qApps.addEventListener("input", () => {
     S.appsQuery = qApps.value;
@@ -1486,6 +1757,11 @@ function bindView() {
 }
 
 document.addEventListener("change", (e) => {
+  const t = e.target;
+  if (t.dataset.watch) return setWatched([Number(t.dataset.watch)], t.checked);
+  if (t.dataset.watchSector !== undefined) return setWatched(t.dataset.ids.split(",").map(Number), t.checked);
+  if (t.dataset.coSectorOf) return updateCompanies([Number(t.dataset.coSectorOf)], { category: t.value || null }, `Moved to ${t.value || "No sector"}`);
+  if (t.dataset.coFlag) return updateCompanies([Number(t.dataset.id)], { [t.dataset.coFlag]: t.checked }, null, true);
   const sel = e.target.closest("select[data-status-of]");
   if (sel) {
     sel.className = `status-pill tone-${STATUS[sel.value]?.tone}`;
@@ -1527,9 +1803,28 @@ document.addEventListener("click", async (e) => {
   const dateBtnEl = e.target.closest("button[data-date]");
   if (dateBtnEl) return editDate(dateBtnEl);
   if (e.target.closest("[data-edit-link]")) return editLink(e.target.closest("td"));
-  if (e.target.closest("#fmenu-root")) return;
+  if (e.target.closest("#fmenu-root, #imenu-root")) return;
   if (S.fmenu && !e.target.closest("[data-fmenu]")) return closeFmenu(); // a click outside just closes the menu, like Excel
-  const el = e.target.closest("[data-act], [data-inbox-tab], [data-inbox-kind], [data-open], [data-filter], [data-fmenu], [data-fclear], [data-sort], [data-chip-remove], .post[data-i]");
+  if (S.imenu && !e.target.closest("[data-imenu]")) return closeImenu();
+  const imenuBtn = e.target.closest("[data-imenu]");
+  if (imenuBtn) return S.imenu?.key === imenuBtn.dataset.imenu ? closeImenu() : openImenu(imenuBtn.dataset.imenu, imenuBtn);
+  const coEl = e.target.closest("[data-co-sector], [data-co-show], [data-co-inbox]");
+  if (coEl) {
+    if (coEl.dataset.coShow) { S.coShow = coEl.dataset.coShow; return render(); }
+    if (coEl.dataset.coSector !== undefined) {
+      const x = coEl.dataset.coSector;
+      S.coSectors = S.coSectors.includes(x) ? S.coSectors.filter((y) => y !== x) : [...S.coSectors, x];
+      return render();
+    }
+    // A company's match count opens the inbox filtered to that company.
+    e.preventDefault();
+    S.inboxF = { companies: [coEl.dataset.coInbox] };
+    localSet("inboxF", JSON.stringify(S.inboxF));
+    S.inboxTab = "new";
+    location.hash = "#inbox";
+    return;
+  }
+  const el = e.target.closest("[data-act], [data-inbox-tab], [data-open], [data-filter], [data-fmenu], [data-fclear], [data-sort], [data-chip-remove], .post[data-i]");
   if (!el) return;
   if (el.dataset.fmenu) {
     const k = el.dataset.fmenu;
@@ -1541,7 +1836,6 @@ document.addEventListener("click", async (e) => {
     setFilter("status", label && !onlyStatus(label) ? { in: [label] } : null);
     return render();
   }
-  if (el.dataset.inboxKind !== undefined) { S.inboxKind = el.dataset.inboxKind; S.cursor = 0; await loadInbox(); return render(); }
   if (el.dataset.chipRemove) {
     const k = el.dataset.chipRemove;
     S.settings[k] = S.settings[k].filter((_, i) => i !== Number(el.dataset.i));
@@ -1591,6 +1885,9 @@ document.addEventListener("click", async (e) => {
     case "save-detected": return saveDetected();
     case "clear-sort": S.sort = { key: null, dir: 1 }; return render();
     case "clear-filters": clearFilters(); S.appsQuery = ""; return render();
+    case "toggle-add": S.coAdd = !(S.coAdd || S.detect); S.detect = null; return render();
+    case "co-all-sectors": S.coSectors = []; return render();
+    case "clear-inbox-filters": S.inboxF = {}; localSet("inboxF", "{}"); await loadInbox(); return render();
     case "paste": return pasteLink();
     case "save-app": return saveApp();
     case "delete-app": return deleteApp();
@@ -1603,6 +1900,7 @@ document.addEventListener("click", async (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && S.fmenu) return closeFmenu();
+  if (e.key === "Escape" && S.imenu) return closeImenu();
   if (e.key === "Escape" && S.drawer) { S.drawer = null; return render(); }
   if (S.view !== "inbox" || S.drawer || e.target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
   const p = S.inbox[S.cursor];

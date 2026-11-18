@@ -375,6 +375,53 @@ async function extract(raw: string, known: Known): Promise<{ row: Row; source: s
   };
 }
 
+// ───────────────────────── reading ads in the background ─────────────────────────
+// Called every 10 minutes by pg_cron (public.enrich_postings). First the start date stated in each new title, for
+// every scraped posting; then the full ad of the newest postings that match your filters, for the start date it
+// states and a one-line summary. Each posting is read once; a closed or unreadable ad keeps what its title gave.
+// deno-lint-ignore no-explicit-any
+async function enrich(db: any, limit: number) {
+  const started = Date.now(), out = { titles: 0, titleStarts: 0, ads: 0, adStarts: 0 };
+  for (;;) {
+    const { data } = await db.from("postings").select("id, title, posted_at, first_seen").is("start_checked", null).limit(1000);
+    if (!data?.length) break;
+    // deno-lint-ignore no-explicit-any
+    const rows = data.map((p: any) => {
+      const st = startFrom(p.title, null, p.posted_at ?? String(p.first_seen).slice(0, 10));
+      if (st) out.titleStarts++;
+      return { id: p.id, starts: st?.text ?? null, starts_on: st?.from ?? null, checked: "title" };
+    });
+    const { error } = await db.rpc("set_posting_details", { p: rows });
+    if (error) throw new Error(error.message);
+    out.titles += rows.length;
+    if (Date.now() - started > 50000) return out;
+  }
+  const { data: todo } = await db.from("postings").select("id, url, title, location, posted_at, first_seen, companies(name)")
+    .eq("matched", true).eq("is_open", true).eq("state", "new").or("start_checked.is.null,start_checked.eq.title")
+    .order("posted_sort", { ascending: false }).limit(limit);
+  const { data: companies } = await db.from("companies").select("name, careers_url, config");
+  // deno-lint-ignore no-explicit-any
+  const queue: any[] = [...(todo ?? [])], results: unknown[] = [];
+  await Promise.all(Array.from({ length: 5 }, async () => {
+    for (let p = queue.shift(); p; p = queue.shift()) {
+      let row: Row | null = null;
+      try {
+        row = (await extract(p.url, { companies: companies ?? [], posting: { title: p.title, location: p.location, posted_at: p.posted_at, company: p.companies?.name ?? null } })).row;
+      } catch { /* closed or unreadable */ }
+      const ref = row?.date_posted ?? p.posted_at ?? String(p.first_seen).slice(0, 10);
+      const st = row?.starts ? startFrom(null, `Start date: ${row.starts}`, ref) : null;
+      if (st) out.adStarts++;
+      results.push({ id: p.id, starts: st?.text ?? null, starts_on: st?.from ?? null, summary: row?.description ?? null, posted_at: row?.date_posted ?? null, checked: "ad" });
+    }
+  }));
+  if (results.length) {
+    const { error } = await db.rpc("set_posting_details", { p: results });
+    if (error) throw new Error(error.message);
+  }
+  out.ads = results.length;
+  return out;
+}
+
 // deno-lint-ignore no-explicit-any
 async function authorised(req: Request, db: any): Promise<boolean> {
   const secret = req.headers.get("x-cron-secret");
@@ -395,6 +442,11 @@ Deno.serve(async (req) => {
   const db = createClient(SUPABASE_URL, SERVICE_KEY);
   if (!(await authorised(req, db))) return json({ error: "unauthorised" }, 401);
   const body = await req.json().catch(() => ({}));
+  if (body.enrich) {
+    if (!req.headers.get("x-cron-secret")) return json({ error: "background job only" }, 403);
+    try { return json(await enrich(db, Math.min(60, Number(body.enrich.limit) || 30))); }
+    catch (e) { return json({ error: String((e as Error).message ?? e) }, 500); }
+  }
   let url: URL;
   try { url = new URL(String(body.url ?? "").trim()); } catch { return json({ ok: false, error: "That doesn't look like a link." }); }
   const { data: companies } = await db.from("companies").select("name, careers_url, config");
