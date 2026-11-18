@@ -1308,7 +1308,7 @@ function companyHealth(c) {
   return `<span class="health ${c.last_status}" title="${esc(c.last_error ?? "")}">${map[c.last_status] ?? c.last_status}</span>`;
 }
 const CATEGORIES = ["Oil & gas major", "Utility & grid", "Trading house", "Engineering & equipment", "Bank", "Infrastructure & pension fund",
-  "Development bank", "Agency & regulator", "Market data & research", "Consulting"];
+  "Development bank", "Agency & regulator", "Market data & research", "Energy consulting", "Consulting"];
 function companiesView() {
   const d = S.detect, cos = S.companies, auto = (c) => c.ats !== "unknown";
   const read = cos.filter((c) => c.active && auto(c)).length, manual = cos.filter((c) => c.active && !auto(c)).length;
