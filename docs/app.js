@@ -56,6 +56,7 @@ const S = {
   coAdd: false,                  // the "add a company" form is open
   newCount: 0,
   brands: {},                    // company key → { domain, icon_url } from the brand function
+  templates: [],                 // cover-letter templates (Letters page)
 };
 
 function localGet(k, d) { try { return localStorage.getItem("jt:" + k) ?? d; } catch { return d; } }
@@ -101,12 +102,13 @@ function fail(error, what) {
 
 // ───────────────────────────── data ─────────────────────────────
 async function loadCore() {
-  const [c, a, s, n, b] = await Promise.all([
+  const [c, a, s, n, b, t] = await Promise.all([
     sb.from("companies").select("*").order("name"),
     sb.from("applications").select("*").order("id", { ascending: true }),
     sb.from("settings").select("*").eq("id", 1).single(),
     sb.from("postings").select("id", { count: "exact", head: true }).eq("state", "new").eq("matched", true).eq("is_open", true),
     sb.from("brands").select("*"),
+    sb.from("letter_templates").select("*").order("position").order("id"),
   ]);
   for (const r of [c, a, s, n]) if (r.error) throw r.error;
   S.brands = Object.fromEntries((b.data ?? []).map((x) => [x.key, x]));
@@ -114,6 +116,7 @@ async function loadCore() {
   S.apps = a.data;
   S.settings = s.data;
   S.newCount = n.count ?? 0;
+  S.templates = t.data ?? [];   // the Letters page still opens (empty) if the table isn't there yet
 }
 async function loadInbox() {
   // Filtering and counting happen in the database (public.inbox), so "All open postings" stays quick with 14 000 ads.
@@ -144,6 +147,7 @@ const ICONS = {
   inbox: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13h5l1.5 3h5L16 13h5"/><path d="M5 5h14l2 8v6H3v-6z"/></svg>`,
   applications: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M3 10h18"/></svg>`,
   companies: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V5l7-2v18M11 9l9 2v10M7 8h1M7 12h1M7 16h1M15 14h1M15 17h1M2 21h20"/></svg>`,
+  letters: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>`,
   settings: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>`,
 };
 
@@ -157,6 +161,7 @@ function shell(content) {
         ${tab("applications", "Applications")}
         ${tab("inbox", "Inbox", S.newCount ? `<span class="count">${S.newCount > 99 ? "99+" : S.newCount}</span>` : "")}
         ${tab("companies", "Companies")}
+        ${tab("letters", "Letters")}
         ${tab("settings", "Settings")}
       </nav>
       <div class="spacer"></div>
@@ -168,7 +173,7 @@ function shell(content) {
 async function render() {
   const app = $("#app");
   if (!S.user) { app.innerHTML = authView(); bindAuth(); return; }
-  const views = { inbox: inboxView, applications: appsView, companies: companiesView, settings: settingsView };
+  const views = { inbox: inboxView, applications: appsView, companies: companiesView, letters: lettersView, settings: settingsView };
   app.innerHTML = shell((views[S.view] ?? appsView)());
   bindView();
   setTimeout(ensureBrands, 300);
@@ -1532,6 +1537,141 @@ function exportCsv() {
   URL.revokeObjectURL(url);
 }
 
+// ───────────────────────────── letters ─────────────────────────────
+// Base cover letters by type of role. Each one is tagged paragraph by paragraph:
+// [REWRITE …] = write fresh for every application, [FIXED …] = reuse, [OPTIONAL …] = keep or cut, [CLOSE] = same every time.
+// Anything still in square brackets is a placeholder, so the counter shows what is left to fill.
+const BRACKETS = /\[[^\[\]\n]{1,300}\]/g;
+function letterStats(text = "") {
+  const words = (text.match(/\S+/g) ?? []).length;
+  const open = (text.match(BRACKETS) ?? []).length;
+  const warn = open > 0 || words > 420;
+  return `<span class="lstat ${warn ? "warn" : "ok"}">${words} words${open ? ` · ${open} to fill or cut` : " · ready"}</span>`;
+}
+// A doc exported as Markdown (or plain text) → plain letter text.
+function fromMarkdown(t) {
+  return t.replace(/\r\n/g, "\n")
+    .replace(/^#{1,6}\s+.*$/gm, "")                      // headings
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, "$1") // links keep their text
+    .replace(/\*\*([^*]+)\*\*/g, "$1").replace(/(^|\W)\*([^*\n]+)\*(?=\W|$)/g, "$1$2")
+    .replace(/\\([\[\]*_#])/g, "$1")
+    .replace(/\n{3,}/g, "\n\n").trim();
+}
+// Start an application's letter from a template: fill what the row already knows and drop the labels of paragraphs kept as is.
+function fillTemplate(body, a) {
+  let t = body.replace(/^[ \t]*\[(FIXED|CLOSE)[^\]\n]*\][ \t]*/gm, "");
+  if (a.company) t = t.replace(/\[Company\]/gi, a.company);
+  if (a.role) t = t.replace(/\[(exact )?role title[^\]\n]*\]/gi, a.role);
+  if (a.starts) t = t.replace(/\[month year\]/gi, a.starts);
+  return t;
+}
+async function copyText(text) {
+  if (!text?.trim()) return toast("Nothing to copy yet.");
+  try { await navigator.clipboard.writeText(text.trim()); }
+  catch { return toast("Couldn't reach the clipboard; select the text and copy it."); }
+  const open = (text.match(BRACKETS) ?? []).length;
+  toast(open ? `Copied, but ${open} bracket${open > 1 ? "s are" : " is"} still in it.` : "Copied");
+}
+function templateCard(t) {
+  return `<section class="panel panel-pad tpl" data-tpl="${t.id}">
+    <div class="tpl-head">
+      <input type="text" name="name" value="${esc(t.name)}" aria-label="Template name" class="tpl-name">
+      <select name="language" aria-label="Language">${["EN", "FR"].map((l) => `<option ${l === t.language ? "selected" : ""}>${l}</option>`).join("")}</select>
+    </div>
+    <input type="text" name="use_for" value="${esc(t.use_for ?? "")}" placeholder="Use for: which roles and companies" aria-label="Use for">
+    <textarea name="body" rows="18" data-count="tpl-${t.id}" spellcheck="true">${esc(t.body)}</textarea>
+    <input type="file" accept=".md,.txt,text/plain,text/markdown" hidden>
+    <div class="toolbar tpl-foot">
+      <span id="tpl-${t.id}">${letterStats(t.body)}</span>
+      <span class="faint small">${t.updated_at ? `Saved ${esc(relTime(t.updated_at))}` : ""}</span>
+      <div class="spacer" style="flex:1"></div>
+      <button class="btn sm ghost danger" data-act="delete-template">Delete</button>
+      <button class="btn sm" data-act="import-template" title="Replace the text with a .md or .txt file, e.g. a doc exported as Markdown">Load file</button>
+      <button class="btn sm" data-act="copy-template">Copy</button>
+      <button class="btn sm primary" data-act="save-template">Save</button>
+    </div>
+  </section>`;
+}
+function lettersView() {
+  const used = (id) => S.apps.filter((a) => a.template_id === id).length;
+  return `
+    <div class="page-head"><div class="grow"><h1>Letters</h1>
+      <p class="sub">Your base cover letters, one per type of role. Paste or load your final version, then start each application's letter from its template in the application's panel. Square brackets mark what's left to fill or cut.</p></div>
+      <button class="btn primary" data-act="new-template">New template</button></div>
+    ${S.templates.length ? `<div class="tpl-list">${S.templates.map(templateCard).join("")}</div>`
+      : `<div class="panel panel-pad muted">No templates yet. Add one, then paste your letter in.</div>`}
+    ${S.templates.length ? `<p class="faint small" style="margin-top:14px">Used so far: ${S.templates.map((t) => `${esc(t.name)} ${used(t.id)}`).join(" · ")}</p>` : ""}`;
+}
+function bindLetters() {
+  document.querySelectorAll("textarea[data-count]").forEach((ta) => ta.addEventListener("input", () => {
+    const out = document.getElementById(ta.dataset.count);
+    if (out) out.innerHTML = letterStats(ta.value);
+  }));
+  document.querySelectorAll("[data-tpl] input[type=file]").forEach((inp) => inp.addEventListener("change", async () => {
+    const f = inp.files?.[0];
+    if (!f) return;
+    const card = inp.closest("[data-tpl]");
+    const ta = card.querySelector("textarea");
+    if (ta.value.trim() && !confirm(`Replace this template's text with ${f.name}?`)) { inp.value = ""; return; }
+    ta.value = fromMarkdown(await f.text());
+    ta.dispatchEvent(new Event("input"));
+    inp.value = "";
+    toast("Loaded. Check it, then Save.");
+  }));
+}
+async function newTemplate() {
+  const position = Math.max(0, ...S.templates.map((t) => t.position)) + 1;
+  const { data, error } = await sb.from("letter_templates").insert({ name: "New template", position }).select().single();
+  if (error) return fail(error, "Couldn't add the template");
+  S.templates.push(data);
+  render();
+  document.querySelector(`[data-tpl="${data.id}"] .tpl-name`)?.select();
+}
+async function saveTemplate(card) {
+  const id = Number(card.dataset.tpl);
+  const val = (n) => card.querySelector(`[name=${n}]`).value;
+  const row = { name: val("name").trim() || "Untitled", use_for: val("use_for").trim() || null, language: val("language"), body: val("body"), updated_at: new Date().toISOString() };
+  const { data, error } = await sb.from("letter_templates").update(row).eq("id", id).select().single();
+  if (error) return fail(error, "Couldn't save the template");
+  S.templates = S.templates.map((t) => (t.id === id ? data : t));
+  toast("Template saved");
+}
+async function deleteTemplate(id) {
+  const t = S.templates.find((x) => x.id === id);
+  if (!confirm(`Delete the template "${t.name}"? Letters already written from it stay on their applications.`)) return;
+  const { error } = await sb.from("letter_templates").delete().eq("id", id);
+  if (error) return fail(error, "Couldn't delete");
+  S.templates = S.templates.filter((x) => x.id !== id);
+  S.apps.forEach((a) => { if (a.template_id === id) a.template_id = null; });
+  render();
+}
+function coverLetterSection(a) {
+  if (!S.drawer?.id) return "";
+  const opts = S.templates.map((t) => `<option value="${t.id}" ${t.id === a.template_id ? "selected" : ""}>${esc(t.name)} (${t.language})</option>`).join("");
+  return `<section><h2 style="margin-bottom:10px">Cover letter</h2>
+    ${S.templates.length ? `<div class="toolbar" style="margin-bottom:10px">
+      <select name="template_id" aria-label="Template" style="flex:1;min-width:180px"><option value="">No template</option>${opts}</select>
+      <button class="btn sm" type="button" data-act="use-template">Start from template</button>
+      <button class="btn sm" type="button" data-act="copy-letter">Copy</button>
+    </div>` : `<p class="faint small" style="margin:0 0 10px">Add templates on the <a href="#letters">Letters</a> page to start letters from them.</p>`}
+    <textarea name="cover_letter" rows="14" data-count="cl-stats" placeholder="The letter you send for this role">${esc(a.cover_letter ?? "")}</textarea>
+    <div style="margin-top:6px" id="cl-stats">${letterStats(a.cover_letter ?? "")}</div>
+  </section>`;
+}
+function useTemplate() {
+  const form = $("#app-form");
+  const t = S.templates.find((x) => x.id === Number(form.template_id.value));
+  if (!t) return toast("Pick a template first.");
+  const ta = form.cover_letter;
+  if (ta.value.trim() && !confirm("Replace the letter in this row with the template?")) return;
+  // Use what's typed in the panel, even before it's saved.
+  const a = { company: form.company.value.trim(), role: form.role.value.trim(), starts: form.starts.value.trim() };
+  ta.value = fillTemplate(t.body, a);
+  ta.dispatchEvent(new Event("input"));
+  ta.focus();
+  ta.setSelectionRange(0, 0);
+}
+
 // ───────────────────────────── drawer ─────────────────────────────
 let drawerEvents = [];
 function drawerHtml() {
@@ -1564,6 +1704,7 @@ function drawerHtml() {
         ${f("documents", "CV and cover letter sent", "text", "wide")}
         <label class="field wide"><span>Notes</span><textarea name="notes" rows="4">${esc(a.notes ?? "")}</textarea></label>
       </div>
+      ${coverLetterSection(a)}
       ${d.id ? `<section><h2 style="margin-bottom:10px">History</h2>
         <ul class="timeline" id="timeline">${timelineHtml()}</ul>
         <div class="toolbar" style="margin:12px 0 0"><input type="text" id="note-input" placeholder="Add a note to the history" style="flex:1"><button class="btn sm" type="button" data-act="add-note">Add</button></div>
@@ -1604,6 +1745,9 @@ async function saveApp() {
     const v = (fd.get(k) ?? "").toString().trim();
     row[k] = v === "" ? null : v;
   }
+  const letter = (fd.get("cover_letter") ?? "").toString().trim();
+  row.cover_letter = letter || null;
+  row.template_id = Number(fd.get("template_id")) || null;
   if (!row.company) return toast("Add the company name first.");
   if (row.starts) row.starts = tidyStart(row.starts);
   const id = S.drawer.id;
@@ -1734,6 +1878,7 @@ function bindView() {
     detect(f.name.value.trim(), f.url.value.trim());
   });
   $("#settings-form")?.addEventListener("submit", (e) => { e.preventDefault(); saveSettings(e.target); });
+  bindLetters();
 
   // chip editors
   document.querySelectorAll("[data-chip-input]").forEach((input) => {
@@ -1890,6 +2035,13 @@ document.addEventListener("click", async (e) => {
     case "clear-inbox-filters": S.inboxF = {}; localSet("inboxF", "{}"); await loadInbox(); return render();
     case "paste": return pasteLink();
     case "save-app": return saveApp();
+    case "use-template": return useTemplate();
+    case "copy-letter": return copyText($("#app-form [name=cover_letter]")?.value);
+    case "new-template": return newTemplate();
+    case "save-template": return saveTemplate(el.closest("[data-tpl]"));
+    case "copy-template": return copyText(el.closest("[data-tpl]").querySelector("textarea").value);
+    case "delete-template": return deleteTemplate(Number(el.closest("[data-tpl]").dataset.tpl));
+    case "import-template": return el.closest("[data-tpl]").querySelector("input[type=file]").click();
     case "delete-app": return deleteApp();
     case "add-note": return addNote();
     case "close": S.drawer = null; return render();
@@ -1918,7 +2070,7 @@ document.addEventListener("keydown", (e) => {
 
 async function route() {
   const v = location.hash.replace("#", "") || "applications";
-  S.view = ["inbox", "applications", "companies", "settings"].includes(v) ? v : "applications";
+  S.view = ["inbox", "applications", "companies", "letters", "settings"].includes(v) ? v : "applications";
   S.drawer = null;
   if (!S.user) return render();
   try {

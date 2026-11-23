@@ -678,3 +678,19 @@ table.stack tr.cat-head th {
   .co-table .row-actions .btn { padding: 0 8px; }
   .co-table .row-actions [data-act="run-one"] { display: none; }
 }
+
+/* ───────── letters ───────── */
+.tpl-list { display: grid; gap: 18px; max-width: 900px; }
+.tpl { display: grid; gap: 10px; }
+.tpl-head { display: flex; gap: 10px; }
+.tpl-head .tpl-name { flex: 1; font-weight: 650; font-size: 16px; }
+.tpl-head select { width: 76px; }
+.tpl textarea, .drawer textarea[name=cover_letter] { line-height: 1.55; font-size: 14px; }
+.tpl-foot { margin: 0; }
+.lstat { font-size: 13px; font-weight: 600; }
+.lstat.ok { color: var(--s-accepted); }
+.lstat.warn { color: var(--s-interview); }
+@media (max-width: 760px) {
+  .tpl-foot .faint { display: none; }
+  .nav a { padding: 6px 5px; }
+}
