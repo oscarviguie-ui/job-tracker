@@ -680,17 +680,20 @@ table.stack tr.cat-head th {
 }
 
 /* ───────── letters ───────── */
-.tpl-list { display: grid; gap: 18px; max-width: 900px; }
-.tpl { display: grid; gap: 10px; }
-.tpl-head { display: flex; gap: 10px; }
-.tpl-head .tpl-name { flex: 1; font-weight: 650; font-size: 16px; }
-.tpl-head select { width: 76px; }
-.tpl textarea, .drawer textarea[name=cover_letter] { line-height: 1.55; font-size: 14px; }
-.tpl-foot { margin: 0; }
-.lstat { font-size: 13px; font-weight: 600; }
-.lstat.ok { color: var(--s-accepted); }
-.lstat.warn { color: var(--s-interview); }
+.letters { max-width: 980px; }
+.letter { display: flex; align-items: center; gap: 14px; padding: 12px 16px; }
+.letter + .letter { border-top: 1px solid var(--line); }
+.letter .ext { flex: none; width: 44px; height: 44px; border-radius: var(--radius-s); background: var(--sunk); display: grid; place-items: center; font-size: 11px; font-weight: 700; color: var(--muted); }
+.letter-main { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.letter-main input { border-color: transparent; background: transparent; padding-left: 4px; }
+.letter-main input:hover { border-color: var(--line); }
+.letter-main > input { font-weight: 650; font-size: 15px; }
+.letter-meta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.letter-meta input { width: 200px; height: 28px; font-size: 13px; }
+.letter-acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 @media (max-width: 760px) {
-  .tpl-foot .faint { display: none; }
+  .letter { flex-wrap: wrap; }
+  .letter-main { flex-basis: calc(100% - 60px); }
+  .letter-acts { width: 100%; justify-content: flex-start; }
   .nav a { padding: 6px 5px; }
 }

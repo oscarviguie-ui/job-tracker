@@ -56,7 +56,8 @@ const S = {
   coAdd: false,                  // the "add a company" form is open
   newCount: 0,
   brands: {},                    // company key → { domain, icon_url } from the brand function
-  templates: [],                 // cover-letter templates (Letters page)
+  letters: [],                   // stored cover letters (Letters page)
+  letterReplace: null,           // id of the letter whose file is being replaced
 };
 
 function localGet(k, d) { try { return localStorage.getItem("jt:" + k) ?? d; } catch { return d; } }
@@ -108,7 +109,7 @@ async function loadCore() {
     sb.from("settings").select("*").eq("id", 1).single(),
     sb.from("postings").select("id", { count: "exact", head: true }).eq("state", "new").eq("matched", true).eq("is_open", true),
     sb.from("brands").select("*"),
-    sb.from("letter_templates").select("*").order("position").order("id"),
+    sb.from("letters").select("*").order("category").order("name"),
   ]);
   for (const r of [c, a, s, n]) if (r.error) throw r.error;
   S.brands = Object.fromEntries((b.data ?? []).map((x) => [x.key, x]));
@@ -116,7 +117,7 @@ async function loadCore() {
   S.apps = a.data;
   S.settings = s.data;
   S.newCount = n.count ?? 0;
-  S.templates = t.data ?? [];   // the Letters page still opens (empty) if the table isn't there yet
+  S.letters = t.data ?? [];     // the Letters page still opens (empty) if the table isn't there yet
 }
 async function loadInbox() {
   // Filtering and counting happen in the database (public.inbox), so "All open postings" stays quick with 14 000 ads.
@@ -1538,138 +1539,109 @@ function exportCsv() {
 }
 
 // ───────────────────────────── letters ─────────────────────────────
-// Base cover letters by type of role. Each one is tagged paragraph by paragraph:
-// [REWRITE …] = write fresh for every application, [FIXED …] = reuse, [OPTIONAL …] = keep or cut, [CLOSE] = same every time.
-// Anything still in square brackets is a placeholder, so the counter shows what is left to fill.
-const BRACKETS = /\[[^\[\]\n]{1,300}\]/g;
-function letterStats(text = "") {
-  const words = (text.match(/\S+/g) ?? []).length;
-  const open = (text.match(BRACKETS) ?? []).length;
-  const warn = open > 0 || words > 420;
-  return `<span class="lstat ${warn ? "warn" : "ok"}">${words} words${open ? ` · ${open} to fill or cut` : " · ready"}</span>`;
-}
-// A doc exported as Markdown (or plain text) → plain letter text.
-function fromMarkdown(t) {
-  return t.replace(/\r\n/g, "\n")
-    .replace(/^#{1,6}\s+.*$/gm, "")                      // headings
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, "$1") // links keep their text
-    .replace(/\*\*([^*]+)\*\*/g, "$1").replace(/(^|\W)\*([^*\n]+)\*(?=\W|$)/g, "$1$2")
-    .replace(/\\([\[\]*_#])/g, "$1")
-    .replace(/\n{3,}/g, "\n\n").trim();
-}
-// Start an application's letter from a template: fill what the row already knows and drop the labels of paragraphs kept as is.
-function fillTemplate(body, a) {
-  let t = body.replace(/^[ \t]*\[(FIXED|CLOSE)[^\]\n]*\][ \t]*/gm, "");
-  if (a.company) t = t.replace(/\[Company\]/gi, a.company);
-  if (a.role) t = t.replace(/\[(exact )?role title[^\]\n]*\]/gi, a.role);
-  if (a.starts) t = t.replace(/\[month year\]/gi, a.starts);
-  return t;
-}
-async function copyText(text) {
-  if (!text?.trim()) return toast("Nothing to copy yet.");
-  try { await navigator.clipboard.writeText(text.trim()); }
-  catch { return toast("Couldn't reach the clipboard; select the text and copy it."); }
-  const open = (text.match(BRACKETS) ?? []).length;
-  toast(open ? `Copied, but ${open} bracket${open > 1 ? "s are" : " is"} still in it.` : "Copied");
-}
-function templateCard(t) {
-  return `<section class="panel panel-pad tpl" data-tpl="${t.id}">
-    <div class="tpl-head">
-      <input type="text" name="name" value="${esc(t.name)}" aria-label="Template name" class="tpl-name">
-      <select name="language" aria-label="Language">${["EN", "FR"].map((l) => `<option ${l === t.language ? "selected" : ""}>${l}</option>`).join("")}</select>
+// A private locker for cover letters: upload Word, PDF or any file, open or download it from any device.
+// Files live in the private "letters" storage bucket; each row here names one and gives it a type.
+const LETTER_TYPES = ["Energy consulting", "Energy major", "Project finance / banks", "Trading / markets", "Project development", "Other"];
+const fmtSize = (n) => (n == null ? "" : n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+const fileExt = (name = "") => (name.match(/\.([a-z0-9]{1,5})$/i)?.[1] ?? "").toUpperCase();
+function letterRow(l) {
+  return `<div class="letter" data-letter="${l.id}">
+    <span class="ext">${esc(fileExt(l.file_name) || "FILE")}</span>
+    <div class="letter-main">
+      <input type="text" value="${esc(l.name)}" data-letter-field="name" aria-label="Name">
+      <div class="letter-meta">
+        <input type="text" value="${esc(l.category ?? "")}" data-letter-field="category" list="letter-types" placeholder="Type of role" aria-label="Type of role">
+        <span class="faint small">${esc(l.file_name)} · ${fmtSize(l.file_size)} · ${esc(fmtDate(l.updated_at))}</span>
+      </div>
     </div>
-    <input type="text" name="use_for" value="${esc(t.use_for ?? "")}" placeholder="Use for: which roles and companies" aria-label="Use for">
-    <textarea name="body" rows="18" data-count="tpl-${t.id}" spellcheck="true">${esc(t.body)}</textarea>
-    <input type="file" accept=".md,.txt,text/plain,text/markdown" hidden>
-    <div class="toolbar tpl-foot">
-      <span id="tpl-${t.id}">${letterStats(t.body)}</span>
-      <span class="faint small">${t.updated_at ? `Saved ${esc(relTime(t.updated_at))}` : ""}</span>
-      <div class="spacer" style="flex:1"></div>
-      <button class="btn sm ghost danger" data-act="delete-template">Delete</button>
-      <button class="btn sm" data-act="import-template" title="Replace the text with a .md or .txt file, e.g. a doc exported as Markdown">Load file</button>
-      <button class="btn sm" data-act="copy-template">Copy</button>
-      <button class="btn sm primary" data-act="save-template">Save</button>
+    <div class="letter-acts">
+      <button class="btn sm primary" data-act="open-letter" data-id="${l.id}">Open</button>
+      <button class="btn sm" data-act="download-letter" data-id="${l.id}">Download</button>
+      <button class="btn sm ghost" data-act="replace-letter" data-id="${l.id}">Replace</button>
+      <button class="btn sm ghost danger" data-act="delete-letter" data-id="${l.id}">Delete</button>
     </div>
-  </section>`;
+  </div>`;
 }
 function lettersView() {
-  const used = (id) => S.apps.filter((a) => a.template_id === id).length;
   return `
     <div class="page-head"><div class="grow"><h1>Letters</h1>
-      <p class="sub">Your base cover letters, one per type of role. Paste or load your final version, then start each application's letter from its template in the application's panel. Square brackets mark what's left to fill or cut.</p></div>
-      <button class="btn primary" data-act="new-template">New template</button></div>
-    ${S.templates.length ? `<div class="tpl-list">${S.templates.map(templateCard).join("")}</div>`
-      : `<div class="panel panel-pad muted">No templates yet. Add one, then paste your letter in.</div>`}
-    ${S.templates.length ? `<p class="faint small" style="margin-top:14px">Used so far: ${S.templates.map((t) => `${esc(t.name)} ${used(t.id)}`).join(" · ")}</p>` : ""}`;
+      <p class="sub">Your cover letters, kept privately and reachable from any device. Upload Word, PDF or text files; rename them and tag the type of role they're for.</p></div>
+      <button class="btn primary" data-act="upload-letter">Upload letters</button></div>
+    <input type="file" id="letter-file" multiple hidden accept=".docx,.doc,.pdf,.odt,.rtf,.txt,.md,.pages">
+    <datalist id="letter-types">${LETTER_TYPES.map((t) => `<option value="${esc(t)}">`).join("")}</datalist>
+    ${S.letters.length ? `<div class="panel letters">${S.letters.map(letterRow).join("")}</div>`
+      : `<div class="panel panel-pad muted">No letters yet. Upload your final versions and they'll be here on your phone and laptop.</div>`}`;
 }
 function bindLetters() {
-  document.querySelectorAll("textarea[data-count]").forEach((ta) => ta.addEventListener("input", () => {
-    const out = document.getElementById(ta.dataset.count);
-    if (out) out.innerHTML = letterStats(ta.value);
-  }));
-  document.querySelectorAll("[data-tpl] input[type=file]").forEach((inp) => inp.addEventListener("change", async () => {
-    const f = inp.files?.[0];
-    if (!f) return;
-    const card = inp.closest("[data-tpl]");
-    const ta = card.querySelector("textarea");
-    if (ta.value.trim() && !confirm(`Replace this template's text with ${f.name}?`)) { inp.value = ""; return; }
-    ta.value = fromMarkdown(await f.text());
-    ta.dispatchEvent(new Event("input"));
-    inp.value = "";
-    toast("Loaded. Check it, then Save.");
+  $("#letter-file")?.addEventListener("change", async (e) => {
+    const files = [...(e.target.files ?? [])];
+    e.target.value = "";
+    const replacing = S.letterReplace;
+    S.letterReplace = null;
+    if (!files.length) return;
+    if (replacing) return replaceLetter(replacing, files[0]);
+    for (const f of files) await uploadLetter(f);
+    render();
+  });
+  document.querySelectorAll("[data-letter-field]").forEach((inp) => inp.addEventListener("change", async () => {
+    const id = Number(inp.closest("[data-letter]").dataset.letter);
+    const key = inp.dataset.letterField;
+    const v = inp.value.trim();
+    if (key === "name" && !v) return toast("A letter needs a name.");
+    const { data, error } = await sb.from("letters").update({ [key]: v || null, updated_at: new Date().toISOString() }).eq("id", id).select().single();
+    if (error) return fail(error, "Couldn't save");
+    S.letters = S.letters.map((l) => (l.id === id ? data : l));
+    toast("Saved");
   }));
 }
-async function newTemplate() {
-  const position = Math.max(0, ...S.templates.map((t) => t.position)) + 1;
-  const { data, error } = await sb.from("letter_templates").insert({ name: "New template", position }).select().single();
-  if (error) return fail(error, "Couldn't add the template");
-  S.templates.push(data);
+const storagePath = (f) => `${crypto.randomUUID()}/${f.name.replace(/[^\w.\-]+/g, "_")}`;
+async function putFile(f) {
+  if (f.size > 20 * 1048576) { toast(`${f.name} is over 20 MB.`); return null; }
+  const path = storagePath(f);
+  const { error } = await sb.storage.from("letters").upload(path, f, { contentType: f.type || undefined });
+  if (error) { fail(error, `Couldn't upload ${f.name}`); return null; }
+  return { file_path: path, file_name: f.name, file_size: f.size, mime: f.type || null };
+}
+async function uploadLetter(f) {
+  toast(`Uploading ${f.name}…`);
+  const file = await putFile(f);
+  if (!file) return;
+  const name = f.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim() || f.name;
+  const { data, error } = await sb.from("letters").insert({ name, ...file }).select().single();
+  if (error) { await sb.storage.from("letters").remove([file.file_path]); return fail(error, "Couldn't save the letter"); }
+  S.letters.push(data);
+  toast(`${f.name} uploaded`);
+}
+async function replaceLetter(id, f) {
+  const old = S.letters.find((l) => l.id === id);
+  if (!confirm(`Replace the file of "${old.name}" with ${f.name}?`)) return;
+  toast(`Uploading ${f.name}…`);
+  const file = await putFile(f);
+  if (!file) return;
+  const { data, error } = await sb.from("letters").update({ ...file, updated_at: new Date().toISOString() }).eq("id", id).select().single();
+  if (error) { await sb.storage.from("letters").remove([file.file_path]); return fail(error, "Couldn't replace the file"); }
+  await sb.storage.from("letters").remove([old.file_path]);
+  S.letters = S.letters.map((l) => (l.id === id ? data : l));
+  toast("File replaced");
   render();
-  document.querySelector(`[data-tpl="${data.id}"] .tpl-name`)?.select();
 }
-async function saveTemplate(card) {
-  const id = Number(card.dataset.tpl);
-  const val = (n) => card.querySelector(`[name=${n}]`).value;
-  const row = { name: val("name").trim() || "Untitled", use_for: val("use_for").trim() || null, language: val("language"), body: val("body"), updated_at: new Date().toISOString() };
-  const { data, error } = await sb.from("letter_templates").update(row).eq("id", id).select().single();
-  if (error) return fail(error, "Couldn't save the template");
-  S.templates = S.templates.map((t) => (t.id === id ? data : t));
-  toast("Template saved");
+async function openLetter(id, download) {
+  const l = S.letters.find((x) => x.id === id);
+  // Open the tab straight away (phones block tabs opened after a wait), then point it at a short-lived private link.
+  const w = download ? null : window.open("", "_blank");
+  const { data, error } = await sb.storage.from("letters").createSignedUrl(l.file_path, 600, download ? { download: l.file_name } : undefined);
+  if (error) { w?.close(); return fail(error, "Couldn't open the file"); }
+  if (w) w.location.href = data.signedUrl;
+  else location.href = data.signedUrl;
 }
-async function deleteTemplate(id) {
-  const t = S.templates.find((x) => x.id === id);
-  if (!confirm(`Delete the template "${t.name}"? Letters already written from it stay on their applications.`)) return;
-  const { error } = await sb.from("letter_templates").delete().eq("id", id);
+async function deleteLetter(id) {
+  const l = S.letters.find((x) => x.id === id);
+  if (!confirm(`Delete "${l.name}"? The file is removed for good.`)) return;
+  const { error } = await sb.from("letters").delete().eq("id", id);
   if (error) return fail(error, "Couldn't delete");
-  S.templates = S.templates.filter((x) => x.id !== id);
-  S.apps.forEach((a) => { if (a.template_id === id) a.template_id = null; });
+  await sb.storage.from("letters").remove([l.file_path]);
+  S.letters = S.letters.filter((x) => x.id !== id);
   render();
-}
-function coverLetterSection(a) {
-  if (!S.drawer?.id) return "";
-  const opts = S.templates.map((t) => `<option value="${t.id}" ${t.id === a.template_id ? "selected" : ""}>${esc(t.name)} (${t.language})</option>`).join("");
-  return `<section><h2 style="margin-bottom:10px">Cover letter</h2>
-    ${S.templates.length ? `<div class="toolbar" style="margin-bottom:10px">
-      <select name="template_id" aria-label="Template" style="flex:1;min-width:180px"><option value="">No template</option>${opts}</select>
-      <button class="btn sm" type="button" data-act="use-template">Start from template</button>
-      <button class="btn sm" type="button" data-act="copy-letter">Copy</button>
-    </div>` : `<p class="faint small" style="margin:0 0 10px">Add templates on the <a href="#letters">Letters</a> page to start letters from them.</p>`}
-    <textarea name="cover_letter" rows="14" data-count="cl-stats" placeholder="The letter you send for this role">${esc(a.cover_letter ?? "")}</textarea>
-    <div style="margin-top:6px" id="cl-stats">${letterStats(a.cover_letter ?? "")}</div>
-  </section>`;
-}
-function useTemplate() {
-  const form = $("#app-form");
-  const t = S.templates.find((x) => x.id === Number(form.template_id.value));
-  if (!t) return toast("Pick a template first.");
-  const ta = form.cover_letter;
-  if (ta.value.trim() && !confirm("Replace the letter in this row with the template?")) return;
-  // Use what's typed in the panel, even before it's saved.
-  const a = { company: form.company.value.trim(), role: form.role.value.trim(), starts: form.starts.value.trim() };
-  ta.value = fillTemplate(t.body, a);
-  ta.dispatchEvent(new Event("input"));
-  ta.focus();
-  ta.setSelectionRange(0, 0);
 }
 
 // ───────────────────────────── drawer ─────────────────────────────
@@ -1704,7 +1676,6 @@ function drawerHtml() {
         ${f("documents", "CV and cover letter sent", "text", "wide")}
         <label class="field wide"><span>Notes</span><textarea name="notes" rows="4">${esc(a.notes ?? "")}</textarea></label>
       </div>
-      ${coverLetterSection(a)}
       ${d.id ? `<section><h2 style="margin-bottom:10px">History</h2>
         <ul class="timeline" id="timeline">${timelineHtml()}</ul>
         <div class="toolbar" style="margin:12px 0 0"><input type="text" id="note-input" placeholder="Add a note to the history" style="flex:1"><button class="btn sm" type="button" data-act="add-note">Add</button></div>
@@ -1745,9 +1716,6 @@ async function saveApp() {
     const v = (fd.get(k) ?? "").toString().trim();
     row[k] = v === "" ? null : v;
   }
-  const letter = (fd.get("cover_letter") ?? "").toString().trim();
-  row.cover_letter = letter || null;
-  row.template_id = Number(fd.get("template_id")) || null;
   if (!row.company) return toast("Add the company name first.");
   if (row.starts) row.starts = tidyStart(row.starts);
   const id = S.drawer.id;
@@ -2035,13 +2003,11 @@ document.addEventListener("click", async (e) => {
     case "clear-inbox-filters": S.inboxF = {}; localSet("inboxF", "{}"); await loadInbox(); return render();
     case "paste": return pasteLink();
     case "save-app": return saveApp();
-    case "use-template": return useTemplate();
-    case "copy-letter": return copyText($("#app-form [name=cover_letter]")?.value);
-    case "new-template": return newTemplate();
-    case "save-template": return saveTemplate(el.closest("[data-tpl]"));
-    case "copy-template": return copyText(el.closest("[data-tpl]").querySelector("textarea").value);
-    case "delete-template": return deleteTemplate(Number(el.closest("[data-tpl]").dataset.tpl));
-    case "import-template": return el.closest("[data-tpl]").querySelector("input[type=file]").click();
+    case "upload-letter": return $("#letter-file").click();
+    case "replace-letter": S.letterReplace = id; return $("#letter-file").click();
+    case "open-letter": return openLetter(id, false);
+    case "download-letter": return openLetter(id, true);
+    case "delete-letter": return deleteLetter(id);
     case "delete-app": return deleteApp();
     case "add-note": return addNote();
     case "close": S.drawer = null; return render();
