@@ -56,6 +56,8 @@ const S = {
   coAdd: false,                  // the "add a company" form is open
   newCount: 0,
   brands: {},                    // company key → { domain, icon_url } from the brand function
+  letters: [],                   // stored cover letters (Letters page)
+  letterReplace: null,           // id of the letter whose file is being replaced
 };
 
 function localGet(k, d) { try { return localStorage.getItem("jt:" + k) ?? d; } catch { return d; } }
@@ -101,12 +103,13 @@ function fail(error, what) {
 
 // ───────────────────────────── data ─────────────────────────────
 async function loadCore() {
-  const [c, a, s, n, b] = await Promise.all([
+  const [c, a, s, n, b, t] = await Promise.all([
     sb.from("companies").select("*").order("name"),
     sb.from("applications").select("*").order("id", { ascending: true }),
     sb.from("settings").select("*").eq("id", 1).single(),
     sb.from("postings").select("id", { count: "exact", head: true }).eq("state", "new").eq("matched", true).eq("is_open", true),
     sb.from("brands").select("*"),
+    sb.from("letters").select("*").order("category").order("name"),
   ]);
   for (const r of [c, a, s, n]) if (r.error) throw r.error;
   S.brands = Object.fromEntries((b.data ?? []).map((x) => [x.key, x]));
@@ -114,6 +117,7 @@ async function loadCore() {
   S.apps = a.data;
   S.settings = s.data;
   S.newCount = n.count ?? 0;
+  S.letters = t.data ?? [];     // the Letters page still opens (empty) if the table isn't there yet
 }
 async function loadInbox() {
   // Filtering and counting happen in the database (public.inbox), so "All open postings" stays quick with 14 000 ads.
@@ -144,6 +148,7 @@ const ICONS = {
   inbox: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13h5l1.5 3h5L16 13h5"/><path d="M5 5h14l2 8v6H3v-6z"/></svg>`,
   applications: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M3 10h18"/></svg>`,
   companies: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V5l7-2v18M11 9l9 2v10M7 8h1M7 12h1M7 16h1M15 14h1M15 17h1M2 21h20"/></svg>`,
+  letters: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>`,
   settings: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>`,
 };
 
@@ -157,6 +162,7 @@ function shell(content) {
         ${tab("applications", "Applications")}
         ${tab("inbox", "Inbox", S.newCount ? `<span class="count">${S.newCount > 99 ? "99+" : S.newCount}</span>` : "")}
         ${tab("companies", "Companies")}
+        ${tab("letters", "Letters")}
         ${tab("settings", "Settings")}
       </nav>
       <div class="spacer"></div>
@@ -168,7 +174,7 @@ function shell(content) {
 async function render() {
   const app = $("#app");
   if (!S.user) { app.innerHTML = authView(); bindAuth(); return; }
-  const views = { inbox: inboxView, applications: appsView, companies: companiesView, settings: settingsView };
+  const views = { inbox: inboxView, applications: appsView, companies: companiesView, letters: lettersView, settings: settingsView };
   app.innerHTML = shell((views[S.view] ?? appsView)());
   bindView();
   setTimeout(ensureBrands, 300);
@@ -1532,6 +1538,112 @@ function exportCsv() {
   URL.revokeObjectURL(url);
 }
 
+// ───────────────────────────── letters ─────────────────────────────
+// A private locker for cover letters: upload Word, PDF or any file, open or download it from any device.
+// Files live in the private "letters" storage bucket; each row here names one and gives it a type.
+const LETTER_TYPES = ["Energy consulting", "Energy major", "Project finance / banks", "Trading / markets", "Project development", "Other"];
+const fmtSize = (n) => (n == null ? "" : n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+const fileExt = (name = "") => (name.match(/\.([a-z0-9]{1,5})$/i)?.[1] ?? "").toUpperCase();
+function letterRow(l) {
+  return `<div class="letter" data-letter="${l.id}">
+    <span class="ext">${esc(fileExt(l.file_name) || "FILE")}</span>
+    <div class="letter-main">
+      <input type="text" value="${esc(l.name)}" data-letter-field="name" aria-label="Name">
+      <div class="letter-meta">
+        <input type="text" value="${esc(l.category ?? "")}" data-letter-field="category" list="letter-types" placeholder="Type of role" aria-label="Type of role">
+        <span class="faint small">${esc(l.file_name)} · ${fmtSize(l.file_size)} · ${esc(fmtDate(l.updated_at))}</span>
+      </div>
+    </div>
+    <div class="letter-acts">
+      <button class="btn sm primary" data-act="open-letter" data-id="${l.id}">Open</button>
+      <button class="btn sm" data-act="download-letter" data-id="${l.id}">Download</button>
+      <button class="btn sm ghost" data-act="replace-letter" data-id="${l.id}">Replace</button>
+      <button class="btn sm ghost danger" data-act="delete-letter" data-id="${l.id}">Delete</button>
+    </div>
+  </div>`;
+}
+function lettersView() {
+  return `
+    <div class="page-head"><div class="grow"><h1>Letters</h1>
+      <p class="sub">Your cover letters, kept privately and reachable from any device. Upload Word, PDF or text files; rename them and tag the type of role they're for.</p></div>
+      <button class="btn primary" data-act="upload-letter">Upload letters</button></div>
+    <input type="file" id="letter-file" multiple hidden accept=".docx,.doc,.pdf,.odt,.rtf,.txt,.md,.pages">
+    <datalist id="letter-types">${LETTER_TYPES.map((t) => `<option value="${esc(t)}">`).join("")}</datalist>
+    ${S.letters.length ? `<div class="panel letters">${S.letters.map(letterRow).join("")}</div>`
+      : `<div class="panel panel-pad muted">No letters yet. Upload your final versions and they'll be here on your phone and laptop.</div>`}`;
+}
+function bindLetters() {
+  $("#letter-file")?.addEventListener("change", async (e) => {
+    const files = [...(e.target.files ?? [])];
+    e.target.value = "";
+    const replacing = S.letterReplace;
+    S.letterReplace = null;
+    if (!files.length) return;
+    if (replacing) return replaceLetter(replacing, files[0]);
+    for (const f of files) await uploadLetter(f);
+    render();
+  });
+  document.querySelectorAll("[data-letter-field]").forEach((inp) => inp.addEventListener("change", async () => {
+    const id = Number(inp.closest("[data-letter]").dataset.letter);
+    const key = inp.dataset.letterField;
+    const v = inp.value.trim();
+    if (key === "name" && !v) return toast("A letter needs a name.");
+    const { data, error } = await sb.from("letters").update({ [key]: v || null, updated_at: new Date().toISOString() }).eq("id", id).select().single();
+    if (error) return fail(error, "Couldn't save");
+    S.letters = S.letters.map((l) => (l.id === id ? data : l));
+    toast("Saved");
+  }));
+}
+const storagePath = (f) => `${crypto.randomUUID()}/${f.name.replace(/[^\w.\-]+/g, "_")}`;
+async function putFile(f) {
+  if (f.size > 20 * 1048576) { toast(`${f.name} is over 20 MB.`); return null; }
+  const path = storagePath(f);
+  const { error } = await sb.storage.from("letters").upload(path, f, { contentType: f.type || undefined });
+  if (error) { fail(error, `Couldn't upload ${f.name}`); return null; }
+  return { file_path: path, file_name: f.name, file_size: f.size, mime: f.type || null };
+}
+async function uploadLetter(f) {
+  toast(`Uploading ${f.name}…`);
+  const file = await putFile(f);
+  if (!file) return;
+  const name = f.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim() || f.name;
+  const { data, error } = await sb.from("letters").insert({ name, ...file }).select().single();
+  if (error) { await sb.storage.from("letters").remove([file.file_path]); return fail(error, "Couldn't save the letter"); }
+  S.letters.push(data);
+  toast(`${f.name} uploaded`);
+}
+async function replaceLetter(id, f) {
+  const old = S.letters.find((l) => l.id === id);
+  if (!confirm(`Replace the file of "${old.name}" with ${f.name}?`)) return;
+  toast(`Uploading ${f.name}…`);
+  const file = await putFile(f);
+  if (!file) return;
+  const { data, error } = await sb.from("letters").update({ ...file, updated_at: new Date().toISOString() }).eq("id", id).select().single();
+  if (error) { await sb.storage.from("letters").remove([file.file_path]); return fail(error, "Couldn't replace the file"); }
+  await sb.storage.from("letters").remove([old.file_path]);
+  S.letters = S.letters.map((l) => (l.id === id ? data : l));
+  toast("File replaced");
+  render();
+}
+async function openLetter(id, download) {
+  const l = S.letters.find((x) => x.id === id);
+  // Open the tab straight away (phones block tabs opened after a wait), then point it at a short-lived private link.
+  const w = download ? null : window.open("", "_blank");
+  const { data, error } = await sb.storage.from("letters").createSignedUrl(l.file_path, 600, download ? { download: l.file_name } : undefined);
+  if (error) { w?.close(); return fail(error, "Couldn't open the file"); }
+  if (w) w.location.href = data.signedUrl;
+  else location.href = data.signedUrl;
+}
+async function deleteLetter(id) {
+  const l = S.letters.find((x) => x.id === id);
+  if (!confirm(`Delete "${l.name}"? The file is removed for good.`)) return;
+  const { error } = await sb.from("letters").delete().eq("id", id);
+  if (error) return fail(error, "Couldn't delete");
+  await sb.storage.from("letters").remove([l.file_path]);
+  S.letters = S.letters.filter((x) => x.id !== id);
+  render();
+}
+
 // ───────────────────────────── drawer ─────────────────────────────
 let drawerEvents = [];
 function drawerHtml() {
@@ -1734,6 +1846,7 @@ function bindView() {
     detect(f.name.value.trim(), f.url.value.trim());
   });
   $("#settings-form")?.addEventListener("submit", (e) => { e.preventDefault(); saveSettings(e.target); });
+  bindLetters();
 
   // chip editors
   document.querySelectorAll("[data-chip-input]").forEach((input) => {
@@ -1890,6 +2003,11 @@ document.addEventListener("click", async (e) => {
     case "clear-inbox-filters": S.inboxF = {}; localSet("inboxF", "{}"); await loadInbox(); return render();
     case "paste": return pasteLink();
     case "save-app": return saveApp();
+    case "upload-letter": return $("#letter-file").click();
+    case "replace-letter": S.letterReplace = id; return $("#letter-file").click();
+    case "open-letter": return openLetter(id, false);
+    case "download-letter": return openLetter(id, true);
+    case "delete-letter": return deleteLetter(id);
     case "delete-app": return deleteApp();
     case "add-note": return addNote();
     case "close": S.drawer = null; return render();
@@ -1918,7 +2036,7 @@ document.addEventListener("keydown", (e) => {
 
 async function route() {
   const v = location.hash.replace("#", "") || "applications";
-  S.view = ["inbox", "applications", "companies", "settings"].includes(v) ? v : "applications";
+  S.view = ["inbox", "applications", "companies", "letters", "settings"].includes(v) ? v : "applications";
   S.drawer = null;
   if (!S.user) return render();
   try {
