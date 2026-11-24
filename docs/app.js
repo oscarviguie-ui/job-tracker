@@ -16,6 +16,7 @@ const STATUSES = [
   { id: "accepted", label: "Accepted", tone: "offer" },
   { id: "rejected", label: "Rejected", tone: "negative" },
   { id: "skipped", label: "Skipped", tone: "skipped" },
+  { id: "missed", label: "Missed", tone: "skipped" }, // the ad closed before you applied
   // older values, shown if a row has them but not offered
   { id: "no_response", label: "Applied", tone: "applied", legacy: true },
   { id: "withdrawn", label: "Withdrawn", tone: "skipped", legacy: true },
@@ -295,7 +296,6 @@ function postingRow(p, i) {
         ${!p.is_open ? `<span class="tag closed">Closed</span>` : ""}
         ${!p.matched && S.inboxTab !== "new" ? `<span class="tag">Outside your keywords</span>` : ""}
       </div>
-      ${p.summary ? `<p class="post-summary">${esc(p.summary)}</p>` : ""}
     </div>
     <div class="post-actions">
       ${p.url ? `<a class="btn sm" href="${safeUrl(p.url)}" target="_blank" rel="noopener" title="${esc(p.url)}">${ICON_OPEN}<span>Open ad</span><span class="post-host">${esc(hostOf(p.url))}</span></a>` : ""}
@@ -550,7 +550,8 @@ async function setPostingState(id, state) {
   removeFromInbox(id, state);
 }
 async function removeFromInbox(id, state) {
-  if (S.inboxTab === "all") {
+  // Tracked postings live in the log, so they leave every tab; a dismissed one stays visible under "All".
+  if (S.inboxTab === "all" && state !== "tracked") {
     const p = S.inbox.find((x) => x.id === id);
     if (p) p.state = state;
   } else {
@@ -961,7 +962,6 @@ function cardHtml(a, n) {
         <span class="card-top"><b class="co">${esc(a.company) || '<span class="faint">No company</span>'}</b><span class="n">#${n}</span></span>
         ${a.role ? `<span class="card-role">${esc(a.role)}</span>` : ""}
         ${meta ? `<span class="card-meta">${meta}</span>` : ""}
-        ${a.description ? `<span class="card-desc">${esc(a.description)}</span>` : ""}
       </span>
     </button>
     <div class="card-foot">
@@ -1259,6 +1259,11 @@ async function addFromLink(raw, mode = "later") {
   done();
   if (error) return fail(error, "Couldn't add the row");
   S.apps.push(data);
+  // The database takes this job's posting out of the inbox; keep the inbox badge in step.
+  refreshCount().then(() => {
+    const b = document.querySelector('.nav a[href="#inbox"] .count');
+    if (b) S.newCount ? (b.textContent = S.newCount > 99 ? "99+" : S.newCount) : b.remove();
+  });
   S.sort = { key: null, dir: 1 };
   S.season = null;
   S.appsQuery = "";
